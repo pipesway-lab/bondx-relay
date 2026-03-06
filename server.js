@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
  */
 app.use(
   cors({
-    origin: "*", // desarrollo LAN
+    origin: "*",
   })
 );
 
@@ -22,7 +22,7 @@ app.use(express.json());
 /**
  * 📩 Enviar mensaje
  */
-app.post("/messages", (req, res) => {
+app.post("/messages", async (req, res) => {
   console.log("📩 POST /messages recibido");
   console.log("Body:", req.body);
 
@@ -35,79 +35,77 @@ app.post("/messages", (req, res) => {
 
   const id = uuidv4();
 
-  db.run(
-    `
-    INSERT INTO messages (id, toKey, fromKey, ciphertext, nonce, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?)
-    `,
-    [id, toKey, fromKey, ciphertext, nonce, timestamp],
-    function (err) {
-      if (err) {
-        console.error("❌ DB INSERT ERROR:", err);
-        return res.status(500).json({ error: "DB error" });
-      }
+  try {
+    await db.query(
+      `
+      INSERT INTO messages (id, tokey, fromkey, ciphertext, nonce, timestamp)
+      VALUES ($1,$2,$3,$4,$5,$6)
+      `,
+      [id, toKey, fromKey, ciphertext, nonce, timestamp]
+    );
 
-      console.log("✅ Mensaje guardado con ID:", id);
+    console.log("✅ Mensaje guardado con ID:", id);
 
-      res.json({ success: true, id });
-    }
-  );
+    res.json({ success: true, id });
+  } catch (err) {
+    console.error("❌ DB INSERT ERROR:", err);
+    res.status(500).json({ error: "DB error" });
+  }
 });
 
 /**
  * 📥 Obtener mensajes pendientes
  */
-app.get("/messages/:publicKey", (req, res) => {
+app.get("/messages/:publicKey", async (req, res) => {
   const { publicKey } = req.params;
 
   console.log("📥 GET mensajes para:", publicKey);
 
-  db.all(
-    `
-    SELECT * FROM messages
-    WHERE toKey = ? AND delivered = 0
-    ORDER BY timestamp ASC
-    `,
-    [publicKey],
-    (err, rows) => {
-      if (err) {
-        console.error("❌ DB SELECT ERROR:", err);
-        return res.status(500).json({ error: "DB error" });
-      }
+  try {
+    const result = await db.query(
+      `
+      SELECT *
+      FROM messages
+      WHERE tokey = $1 AND delivered = false
+      ORDER BY timestamp ASC
+      `,
+      [publicKey]
+    );
 
-      console.log(`📦 ${rows.length} mensajes pendientes encontrados`);
+    console.log(`📦 ${result.rows.length} mensajes pendientes encontrados`);
 
-      res.json(rows);
-    }
-  );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ DB SELECT ERROR:", err);
+    res.status(500).json({ error: "DB error" });
+  }
 });
 
 /**
  * ✅ Marcar mensaje como entregado
  */
-app.post("/messages/:id/ack", (req, res) => {
+app.post("/messages/:id/ack", async (req, res) => {
   const { id } = req.params;
 
   console.log("✅ ACK recibido para mensaje:", id);
 
-  db.run(
-    `
-    UPDATE messages
-    SET delivered = 1
-    WHERE id = ?
-    `,
-    [id],
-    function (err) {
-      if (err) {
-        console.error("❌ DB UPDATE ERROR:", err);
-        return res.status(500).json({ error: "DB error" });
-      }
+  try {
+    await db.query(
+      `
+      UPDATE messages
+      SET delivered = true
+      WHERE id = $1
+      `,
+      [id]
+    );
 
-      console.log("✔ Mensaje marcado como entregado:", id);
+    console.log("✔ Mensaje marcado como entregado:", id);
 
-      res.json({ success: true });
-    }
-  );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ DB UPDATE ERROR:", err);
+    res.status(500).json({ error: "DB error" });
+  }
 });
 
 /**
@@ -125,6 +123,5 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log("=================================");
   console.log("BondX relay running");
   console.log(`Local:   http://localhost:${PORT}/health`);
-  console.log(`LAN:     http://TU_IP_LOCAL:${PORT}/health`);
   console.log("=================================");
 });
