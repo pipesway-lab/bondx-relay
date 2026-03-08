@@ -39,6 +39,20 @@ async function areUsersLinked(userA, userB) {
 }
 
 /**
+ * 👤 Registrar usuario si no existe
+ */
+async function ensureUser(publicKey) {
+  await db.query(
+    `
+    INSERT INTO users (public_key)
+    VALUES ($1)
+    ON CONFLICT (public_key) DO NOTHING
+    `,
+    [publicKey]
+  );
+}
+
+/**
  * 📩 Enviar mensaje
  */
 app.post("/messages", async (req, res) => {
@@ -55,7 +69,6 @@ app.post("/messages", async (req, res) => {
   const id = uuidv4();
 
   try {
-    // 🔐 Solo permitir mensajes entre usuarios vinculados
     const linked = await areUsersLinked(fromKey, toKey);
 
     if (!linked) {
@@ -82,6 +95,7 @@ app.post("/messages", async (req, res) => {
 
 /**
  * 📥 Obtener mensajes pendientes
+ * Solo devuelve mensajes cuyo emisor y receptor sigan vinculados.
  */
 app.get("/messages/:publicKey", async (req, res) => {
   const { publicKey } = req.params;
@@ -91,10 +105,18 @@ app.get("/messages/:publicKey", async (req, res) => {
   try {
     const result = await db.query(
       `
-      SELECT *
-      FROM messages
-      WHERE tokey = $1 AND delivered = false
-      ORDER BY timestamp ASC
+      SELECT m.*
+      FROM messages m
+      WHERE m.tokey = $1
+        AND m.delivered = false
+        AND EXISTS (
+          SELECT 1
+          FROM link_members lm1
+          JOIN link_members lm2 ON lm1.link_id = lm2.link_id
+          WHERE lm1.user_public_key = m.fromkey
+            AND lm2.user_public_key = m.tokey
+        )
+      ORDER BY m.timestamp ASC
       `,
       [publicKey]
     );
@@ -110,6 +132,7 @@ app.get("/messages/:publicKey", async (req, res) => {
 
 /**
  * ✅ Marcar mensaje como entregado
+ * Solo hace ACK si el mensaje pertenece a usuarios que siguen vinculados.
  */
 app.post("/messages/:id/ack", async (req, res) => {
   const { id } = req.params;
@@ -117,6 +140,28 @@ app.post("/messages/:id/ack", async (req, res) => {
   console.log("✅ ACK recibido para mensaje:", id);
 
   try {
+    const messageResult = await db.query(
+      `
+      SELECT id, fromkey, tokey
+      FROM messages
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [id]
+    );
+
+    if (messageResult.rows.length === 0) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    const message = messageResult.rows[0];
+    const linked = await areUsersLinked(message.fromkey, message.tokey);
+
+    if (!linked) {
+      console.log("❌ ACK rechazado: usuarios ya no vinculados.");
+      return res.status(403).json({ error: "Users are not linked" });
+    }
+
     await db.query(
       `
       UPDATE messages
@@ -134,20 +179,6 @@ app.post("/messages/:id/ack", async (req, res) => {
     res.status(500).json({ error: "DB error" });
   }
 });
-
-/**
- * 👤 Registrar usuario si no existe
- */
-async function ensureUser(publicKey) {
-  await db.query(
-    `
-    INSERT INTO users (public_key)
-    VALUES ($1)
-    ON CONFLICT (public_key) DO NOTHING
-    `,
-    [publicKey]
-  );
-}
 
 /**
  * 🔎 Obtener link activo de un usuario
@@ -201,7 +232,6 @@ app.post("/link-request", async (req, res) => {
     await ensureUser(fromUser);
     await ensureUser(toUser);
 
-    // evitar duplicados pendientes
     const existingPending = await db.query(
       `
       SELECT id
