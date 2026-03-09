@@ -391,6 +391,31 @@ app.post("/links/:id/unlink", async (req, res) => {
 });
 
 /**
+ * 📤 Obtener estado de mensajes enviados
+ */
+app.get("/messages/sent/:publicKey", async (req, res) => {
+  const { publicKey } = req.params;
+
+  try {
+    const result = await db.query(
+      `
+      SELECT id, delivered
+      FROM messages
+      WHERE fromkey = $1
+      ORDER BY timestamp DESC
+      LIMIT 50
+      `,
+      [publicKey]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ GET /messages/sent error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
  * 🩺 Health check
  */
 app.get("/health", (req, res) => {
