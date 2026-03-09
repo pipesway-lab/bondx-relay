@@ -181,6 +181,56 @@ app.post("/messages/:id/ack", async (req, res) => {
 });
 
 /**
+ * 👁️ Marcar mensaje como leído
+ * Solo permite marcar como leído si el mensaje existe y ambos usuarios siguen vinculados.
+ */
+app.post("/messages/:id/read", async (req, res) => {
+  const { id } = req.params;
+
+  console.log("👁️ READ recibido para mensaje:", id);
+
+  try {
+    const messageResult = await db.query(
+      `
+      SELECT id, fromkey, tokey, read_at
+      FROM messages
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [id]
+    );
+
+    if (messageResult.rows.length === 0) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    const message = messageResult.rows[0];
+    const linked = await areUsersLinked(message.fromkey, message.tokey);
+
+    if (!linked) {
+      console.log("❌ READ rechazado: usuarios ya no vinculados.");
+      return res.status(403).json({ error: "Users are not linked" });
+    }
+
+    await db.query(
+      `
+      UPDATE messages
+      SET read_at = NOW()
+      WHERE id = $1
+      `,
+      [id]
+    );
+
+    console.log("✔ Mensaje marcado como leído:", id);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ DB READ UPDATE ERROR:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
  * 🔎 Obtener link activo de un usuario
  */
 app.get("/links/:publicKey", async (req, res) => {
@@ -392,6 +442,7 @@ app.post("/links/:id/unlink", async (req, res) => {
 
 /**
  * 📤 Obtener estado de mensajes enviados
+ * Devuelve también read_at para soportar "leído"
  */
 app.get("/messages/sent/:publicKey", async (req, res) => {
   const { publicKey } = req.params;
@@ -399,7 +450,7 @@ app.get("/messages/sent/:publicKey", async (req, res) => {
   try {
     const result = await db.query(
       `
-      SELECT id, delivered
+      SELECT id, delivered, read_at
       FROM messages
       WHERE fromkey = $1
       ORDER BY timestamp DESC
@@ -429,6 +480,6 @@ app.get("/health", (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("=================================");
   console.log("BondX relay running");
-  console.log(`Local:   http://localhost:${PORT}/health`);
+  console.log(`Local: http://localhost:${PORT}/health`);
   console.log("=================================");
 });
