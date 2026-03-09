@@ -3,10 +3,13 @@ console.log("Starting BondX relay...");
 const express = require("express");
 const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
+const nacl = require("tweetnacl");
+const { decodeBase64 } = require("tweetnacl-util");
 const db = require("./db");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutos
 
 /**
  * 🌍 Middleware
@@ -14,7 +17,7 @@ const PORT = process.env.PORT || 3000;
 app.use(
   cors({
     origin: "*",
-  })
+  }),
 );
 
 app.use(express.json());
@@ -32,7 +35,7 @@ async function areUsersLinked(userA, userB) {
       AND lm2.user_public_key = $2
     LIMIT 1
     `,
-    [userA, userB]
+    [userA, userB],
   );
 
   return result.rows.length > 0;
@@ -48,8 +51,134 @@ async function ensureUser(publicKey) {
     VALUES ($1)
     ON CONFLICT (public_key) DO NOTHING
     `,
-    [publicKey]
+    [publicKey],
   );
+}
+
+/**
+ * 🔑 Vincular o verificar signing public key de un usuario
+ *
+ * Nota:
+ * esto implementa un modelo TOFU (trust on first use):
+ * la primera vez que el servidor ve un signerPublicKey para un publicKey,
+ * lo almacena. A partir de entonces debe coincidir siempre.
+ */
+async function bindOrVerifySigningKey(userPublicKey, signerPublicKey) {
+  const existing = await db.query(
+    `
+    SELECT signing_public_key
+    FROM users
+    WHERE public_key = $1
+    LIMIT 1
+    `,
+    [userPublicKey],
+  );
+
+  if (existing.rows.length === 0) {
+    await db.query(
+      `
+      INSERT INTO users (public_key, signing_public_key)
+      VALUES ($1, $2)
+      `,
+      [userPublicKey, signerPublicKey],
+    );
+    return true;
+  }
+
+  const stored = existing.rows[0].signing_public_key;
+
+  if (!stored) {
+    await db.query(
+      `
+      UPDATE users
+      SET signing_public_key = $2
+      WHERE public_key = $1
+      `,
+      [userPublicKey, signerPublicKey],
+    );
+    return true;
+  }
+
+  return stored === signerPublicKey;
+}
+
+/**
+ * 🔍 Buscar usuario por signing public key
+ */
+async function getUserBySigningPublicKey(signerPublicKey) {
+  const result = await db.query(
+    `
+    SELECT public_key
+    FROM users
+    WHERE signing_public_key = $1
+    LIMIT 1
+    `,
+    [signerPublicKey],
+  );
+
+  return result.rows.length > 0 ? result.rows[0].public_key : null;
+}
+
+/**
+ * ✅ Verifica firma detached Ed25519
+ */
+function verifySignature(canonicalPayload, signatureBase64, signerPublicKeyBase64) {
+  try {
+    const messageBytes = Buffer.from(canonicalPayload, "utf8");
+    const signature = decodeBase64(signatureBase64);
+    const signerPublicKey = decodeBase64(signerPublicKeyBase64);
+
+    return nacl.sign.detached.verify(messageBytes, signature, signerPublicKey);
+  } catch (err) {
+    console.error("❌ Signature verification error:", err);
+    return false;
+  }
+}
+
+/**
+ * 🧾 Verifica request firmado
+ */
+function verifySignedRequest(payloadFields, reqBody) {
+  const { signedAt, signerPublicKey, signature } = reqBody;
+
+  if (!signedAt || !signerPublicKey || !signature) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Missing signature fields",
+    };
+  }
+
+  const age = Math.abs(Date.now() - Number(signedAt));
+  if (Number.isNaN(age) || age > SIGNATURE_MAX_AGE_MS) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Signature expired or invalid timestamp",
+    };
+  }
+
+  const canonicalPayload = JSON.stringify({
+    ...payloadFields,
+    signedAt,
+    signerPublicKey,
+  });
+
+  const valid = verifySignature(canonicalPayload, signature, signerPublicKey);
+
+  if (!valid) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Invalid signature",
+    };
+  }
+
+  return {
+    ok: true,
+    signerPublicKey,
+    signedAt,
+  };
 }
 
 /**
@@ -59,16 +188,37 @@ app.post("/messages", async (req, res) => {
   console.log("📩 POST /messages recibido");
   console.log("Body:", req.body);
 
-  const { toKey, fromKey, ciphertext, nonce, timestamp } = req.body;
+  const {
+    toKey,
+    fromKey,
+    ciphertext,
+    nonce,
+    timestamp,
+    signedAt,
+    signerPublicKey,
+    signature,
+  } = req.body;
 
   if (!toKey || !fromKey || !ciphertext || !nonce || !timestamp) {
     console.log("❌ Missing fields");
     return res.status(400).json({ error: "Missing fields" });
   }
 
-  const id = uuidv4();
+  const signatureCheck = verifySignedRequest(
+    { toKey, fromKey, ciphertext, nonce, timestamp },
+    { signedAt, signerPublicKey, signature },
+  );
+
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
 
   try {
+    const signingKeyOk = await bindOrVerifySigningKey(fromKey, signerPublicKey);
+    if (!signingKeyOk) {
+      return res.status(403).json({ error: "Signer does not match sender" });
+    }
+
     const linked = await areUsersLinked(fromKey, toKey);
 
     if (!linked) {
@@ -76,12 +226,14 @@ app.post("/messages", async (req, res) => {
       return res.status(403).json({ error: "Users are not linked" });
     }
 
+    const id = uuidv4();
+
     await db.query(
       `
       INSERT INTO messages (id, tokey, fromkey, ciphertext, nonce, timestamp)
       VALUES ($1,$2,$3,$4,$5,$6)
       `,
-      [id, toKey, fromKey, ciphertext, nonce, timestamp]
+      [id, toKey, fromKey, ciphertext, nonce, timestamp],
     );
 
     console.log("✅ Mensaje guardado con ID:", id);
@@ -89,6 +241,34 @@ app.post("/messages", async (req, res) => {
     res.json({ success: true, id });
   } catch (err) {
     console.error("❌ DB INSERT ERROR:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 📤 Obtener estado de mensajes enviados
+ * Devuelve también read_at para soportar "leído"
+ *
+ * ⚠️ Va antes que /messages/:publicKey para evitar colisión de rutas
+ */
+app.get("/messages/sent/:publicKey", async (req, res) => {
+  const { publicKey } = req.params;
+
+  try {
+    const result = await db.query(
+      `
+      SELECT id, delivered, read_at
+      FROM messages
+      WHERE fromkey = $1
+      ORDER BY timestamp DESC
+      LIMIT 50
+      `,
+      [publicKey],
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ GET /messages/sent error:", err);
     res.status(500).json({ error: "DB error" });
   }
 });
@@ -118,7 +298,7 @@ app.get("/messages/:publicKey", async (req, res) => {
         )
       ORDER BY m.timestamp ASC
       `,
-      [publicKey]
+      [publicKey],
     );
 
     console.log(`📦 ${result.rows.length} mensajes pendientes encontrados`);
@@ -136,8 +316,18 @@ app.get("/messages/:publicKey", async (req, res) => {
  */
 app.post("/messages/:id/ack", async (req, res) => {
   const { id } = req.params;
+  const { signedAt, signerPublicKey, signature } = req.body;
 
   console.log("✅ ACK recibido para mensaje:", id);
+
+  const signatureCheck = verifySignedRequest(
+    { id },
+    { signedAt, signerPublicKey, signature },
+  );
+
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
 
   try {
     const messageResult = await db.query(
@@ -147,7 +337,7 @@ app.post("/messages/:id/ack", async (req, res) => {
       WHERE id = $1
       LIMIT 1
       `,
-      [id]
+      [id],
     );
 
     if (messageResult.rows.length === 0) {
@@ -155,6 +345,12 @@ app.post("/messages/:id/ack", async (req, res) => {
     }
 
     const message = messageResult.rows[0];
+
+    const signingKeyOk = await bindOrVerifySigningKey(message.tokey, signerPublicKey);
+    if (!signingKeyOk) {
+      return res.status(403).json({ error: "Signer does not match recipient" });
+    }
+
     const linked = await areUsersLinked(message.fromkey, message.tokey);
 
     if (!linked) {
@@ -168,7 +364,7 @@ app.post("/messages/:id/ack", async (req, res) => {
       SET delivered = true
       WHERE id = $1
       `,
-      [id]
+      [id],
     );
 
     console.log("✔ Mensaje marcado como entregado:", id);
@@ -186,8 +382,18 @@ app.post("/messages/:id/ack", async (req, res) => {
  */
 app.post("/messages/:id/read", async (req, res) => {
   const { id } = req.params;
+  const { signedAt, signerPublicKey, signature } = req.body;
 
   console.log("👁️ READ recibido para mensaje:", id);
+
+  const signatureCheck = verifySignedRequest(
+    { id },
+    { signedAt, signerPublicKey, signature },
+  );
+
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
 
   try {
     const messageResult = await db.query(
@@ -197,7 +403,7 @@ app.post("/messages/:id/read", async (req, res) => {
       WHERE id = $1
       LIMIT 1
       `,
-      [id]
+      [id],
     );
 
     if (messageResult.rows.length === 0) {
@@ -205,6 +411,12 @@ app.post("/messages/:id/read", async (req, res) => {
     }
 
     const message = messageResult.rows[0];
+
+    const signingKeyOk = await bindOrVerifySigningKey(message.tokey, signerPublicKey);
+    if (!signingKeyOk) {
+      return res.status(403).json({ error: "Signer does not match recipient" });
+    }
+
     const linked = await areUsersLinked(message.fromkey, message.tokey);
 
     if (!linked) {
@@ -218,7 +430,7 @@ app.post("/messages/:id/read", async (req, res) => {
       SET read_at = NOW()
       WHERE id = $1
       `,
-      [id]
+      [id],
     );
 
     console.log("✔ Mensaje marcado como leído:", id);
@@ -254,7 +466,7 @@ app.get("/links/:publicKey", async (req, res) => {
       ORDER BY l.created_at DESC
       LIMIT 1
       `,
-      [publicKey]
+      [publicKey],
     );
 
     if (result.rows.length === 0) {
@@ -272,15 +484,35 @@ app.get("/links/:publicKey", async (req, res) => {
  * 📩 Crear solicitud de vínculo
  */
 app.post("/link-request", async (req, res) => {
-  const { fromUser, toUser } = req.body;
+  const {
+    fromUser,
+    toUser,
+    signedAt,
+    signerPublicKey,
+    signature,
+  } = req.body;
 
   if (!fromUser || !toUser || fromUser === toUser) {
     return res.status(400).json({ error: "Invalid users" });
   }
 
+  const signatureCheck = verifySignedRequest(
+    { fromUser, toUser },
+    { signedAt, signerPublicKey, signature },
+  );
+
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
+
   try {
     await ensureUser(fromUser);
     await ensureUser(toUser);
+
+    const signingKeyOk = await bindOrVerifySigningKey(fromUser, signerPublicKey);
+    if (!signingKeyOk) {
+      return res.status(403).json({ error: "Signer does not match fromUser" });
+    }
 
     const existingPending = await db.query(
       `
@@ -291,7 +523,7 @@ app.post("/link-request", async (req, res) => {
         AND status = 'pending'
       LIMIT 1
       `,
-      [fromUser, toUser]
+      [fromUser, toUser],
     );
 
     if (existingPending.rows.length > 0) {
@@ -308,7 +540,7 @@ app.post("/link-request", async (req, res) => {
       VALUES ($1, $2, 'pending')
       RETURNING id
       `,
-      [fromUser, toUser]
+      [fromUser, toUser],
     );
 
     res.json({
@@ -336,7 +568,7 @@ app.get("/link-requests/:publicKey", async (req, res) => {
         AND status = 'pending'
       ORDER BY created_at ASC
       `,
-      [publicKey]
+      [publicKey],
     );
 
     res.json(result.rows);
@@ -350,10 +582,19 @@ app.get("/link-requests/:publicKey", async (req, res) => {
  * ✅ Aceptar solicitud de vínculo
  */
 app.post("/link-accept", async (req, res) => {
-  const { requestId } = req.body;
+  const { requestId, signedAt, signerPublicKey, signature } = req.body;
 
   if (!requestId) {
     return res.status(400).json({ error: "Missing requestId" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { requestId },
+    { signedAt, signerPublicKey, signature },
+  );
+
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
   }
 
   try {
@@ -365,7 +606,7 @@ app.post("/link-accept", async (req, res) => {
         AND status = 'pending'
       LIMIT 1
       `,
-      [requestId]
+      [requestId],
     );
 
     if (requestResult.rows.length === 0) {
@@ -374,11 +615,16 @@ app.post("/link-accept", async (req, res) => {
 
     const request = requestResult.rows[0];
 
+    const signingKeyOk = await bindOrVerifySigningKey(request.to_user, signerPublicKey);
+    if (!signingKeyOk) {
+      return res.status(403).json({ error: "Signer does not match receiver" });
+    }
+
     const linkResult = await db.query(
       `
       INSERT INTO links DEFAULT VALUES
       RETURNING id
-      `
+      `,
     );
 
     const linkId = linkResult.rows[0].id;
@@ -388,7 +634,7 @@ app.post("/link-accept", async (req, res) => {
       INSERT INTO link_members (link_id, user_public_key)
       VALUES ($1, $2), ($1, $3)
       `,
-      [linkId, request.from_user, request.to_user]
+      [linkId, request.from_user, request.to_user],
     );
 
     await db.query(
@@ -397,7 +643,7 @@ app.post("/link-accept", async (req, res) => {
       SET status = 'accepted'
       WHERE id = $1
       `,
-      [requestId]
+      [requestId],
     );
 
     res.json({
@@ -415,14 +661,49 @@ app.post("/link-accept", async (req, res) => {
  */
 app.post("/links/:id/unlink", async (req, res) => {
   const { id } = req.params;
+  const { linkId, signedAt, signerPublicKey, signature } = req.body;
+
+  if (!linkId || String(linkId) !== String(id)) {
+    return res.status(400).json({ error: "Invalid linkId" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { linkId },
+    { signedAt, signerPublicKey, signature },
+  );
+
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
 
   try {
+    const signerUser = await getUserBySigningPublicKey(signerPublicKey);
+
+    if (!signerUser) {
+      return res.status(403).json({ error: "Unknown signer" });
+    }
+
+    const membership = await db.query(
+      `
+      SELECT 1
+      FROM link_members
+      WHERE link_id = $1
+        AND user_public_key = $2
+      LIMIT 1
+      `,
+      [id, signerUser],
+    );
+
+    if (membership.rows.length === 0) {
+      return res.status(403).json({ error: "Signer is not a member of this link" });
+    }
+
     await db.query(
       `
       DELETE FROM link_members
       WHERE link_id = $1
       `,
-      [id]
+      [id],
     );
 
     await db.query(
@@ -430,38 +711,12 @@ app.post("/links/:id/unlink", async (req, res) => {
       DELETE FROM links
       WHERE id = $1
       `,
-      [id]
+      [id],
     );
 
     res.json({ success: true });
   } catch (err) {
     console.error("❌ POST /links/:id/unlink error:", err);
-    res.status(500).json({ error: "DB error" });
-  }
-});
-
-/**
- * 📤 Obtener estado de mensajes enviados
- * Devuelve también read_at para soportar "leído"
- */
-app.get("/messages/sent/:publicKey", async (req, res) => {
-  const { publicKey } = req.params;
-
-  try {
-    const result = await db.query(
-      `
-      SELECT id, delivered, read_at
-      FROM messages
-      WHERE fromkey = $1
-      ORDER BY timestamp DESC
-      LIMIT 50
-      `,
-      [publicKey]
-    );
-
-    res.json(result.rows);
-  } catch (err) {
-    console.error("❌ GET /messages/sent error:", err);
     res.status(500).json({ error: "DB error" });
   }
 });
