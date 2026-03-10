@@ -722,6 +722,88 @@ app.post("/links/:id/unlink", async (req, res) => {
 });
 
 /**
+ * 👤 Obtener perfil básico de un usuario
+ */
+app.get("/users/:publicKey", async (req, res) => {
+  const { publicKey } = req.params;
+
+  try {
+    const result = await db.query(
+      `
+      SELECT public_key, relationship_preference
+      FROM users
+      WHERE public_key = $1
+      LIMIT 1
+      `,
+      [publicKey]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ GET /users/:publicKey error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * ❤️ Actualizar preferencia relacional del usuario
+ * Requiere firma
+ */
+app.post("/users/preference", async (req, res) => {
+  const {
+    publicKey,
+    preference,
+    signedAt,
+    signerPublicKey,
+    signature,
+  } = req.body;
+
+  if (!publicKey || !preference) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
+  if (!["closed", "open"].includes(preference)) {
+    return res.status(400).json({ error: "Invalid preference" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { publicKey, preference },
+    { signedAt, signerPublicKey, signature }
+  );
+
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
+
+  try {
+    await ensureUser(publicKey);
+
+    const signingKeyOk = await bindOrVerifySigningKey(publicKey, signerPublicKey);
+    if (!signingKeyOk) {
+      return res.status(403).json({ error: "Signer does not match user" });
+    }
+
+    await db.query(
+      `
+      UPDATE users
+      SET relationship_preference = $2
+      WHERE public_key = $1
+      `,
+      [publicKey, preference]
+    );
+
+    res.json({ success: true, preference });
+  } catch (err) {
+    console.error("❌ POST /users/preference error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
  * 🩺 Health check
  */
 app.get("/health", (req, res) => {
