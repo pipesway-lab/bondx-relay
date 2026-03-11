@@ -58,10 +58,9 @@ async function ensureUser(publicKey) {
 /**
  * 🔑 Vincular o verificar signing public key de un usuario
  *
- * Nota:
- * esto implementa un modelo TOFU (trust on first use):
+ * Modelo TOFU (trust on first use):
  * la primera vez que el servidor ve un signerPublicKey para un publicKey,
- * lo almacena. A partir de entonces debe coincidir siempre.
+ * lo almacena. Después debe coincidir siempre.
  */
 async function bindOrVerifySigningKey(userPublicKey, signerPublicKey) {
   const existing = await db.query(
@@ -122,7 +121,11 @@ async function getUserBySigningPublicKey(signerPublicKey) {
 /**
  * ✅ Verifica firma detached Ed25519
  */
-function verifySignature(canonicalPayload, signatureBase64, signerPublicKeyBase64) {
+function verifySignature(
+  canonicalPayload,
+  signatureBase64,
+  signerPublicKeyBase64,
+) {
   try {
     const messageBytes = Buffer.from(canonicalPayload, "utf8");
     const signature = decodeBase64(signatureBase64);
@@ -210,7 +213,9 @@ app.post("/messages", async (req, res) => {
   );
 
   if (!signatureCheck.ok) {
-    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+    return res
+      .status(signatureCheck.status)
+      .json({ error: signatureCheck.error });
   }
 
   try {
@@ -326,7 +331,9 @@ app.post("/messages/:id/ack", async (req, res) => {
   );
 
   if (!signatureCheck.ok) {
-    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+    return res
+      .status(signatureCheck.status)
+      .json({ error: signatureCheck.error });
   }
 
   try {
@@ -346,7 +353,10 @@ app.post("/messages/:id/ack", async (req, res) => {
 
     const message = messageResult.rows[0];
 
-    const signingKeyOk = await bindOrVerifySigningKey(message.tokey, signerPublicKey);
+    const signingKeyOk = await bindOrVerifySigningKey(
+      message.tokey,
+      signerPublicKey,
+    );
     if (!signingKeyOk) {
       return res.status(403).json({ error: "Signer does not match recipient" });
     }
@@ -392,7 +402,9 @@ app.post("/messages/:id/read", async (req, res) => {
   );
 
   if (!signatureCheck.ok) {
-    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+    return res
+      .status(signatureCheck.status)
+      .json({ error: signatureCheck.error });
   }
 
   try {
@@ -412,7 +424,10 @@ app.post("/messages/:id/read", async (req, res) => {
 
     const message = messageResult.rows[0];
 
-    const signingKeyOk = await bindOrVerifySigningKey(message.tokey, signerPublicKey);
+    const signingKeyOk = await bindOrVerifySigningKey(
+      message.tokey,
+      signerPublicKey,
+    );
     if (!signingKeyOk) {
       return res.status(403).json({ error: "Signer does not match recipient" });
     }
@@ -484,13 +499,7 @@ app.get("/links/:publicKey", async (req, res) => {
  * 📩 Crear solicitud de vínculo
  */
 app.post("/link-request", async (req, res) => {
-  const {
-    fromUser,
-    toUser,
-    signedAt,
-    signerPublicKey,
-    signature,
-  } = req.body;
+  const { fromUser, toUser, signedAt, signerPublicKey, signature } = req.body;
 
   if (!fromUser || !toUser || fromUser === toUser) {
     return res.status(400).json({ error: "Invalid users" });
@@ -502,14 +511,19 @@ app.post("/link-request", async (req, res) => {
   );
 
   if (!signatureCheck.ok) {
-    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+    return res
+      .status(signatureCheck.status)
+      .json({ error: signatureCheck.error });
   }
 
   try {
     await ensureUser(fromUser);
     await ensureUser(toUser);
 
-    const signingKeyOk = await bindOrVerifySigningKey(fromUser, signerPublicKey);
+    const signingKeyOk = await bindOrVerifySigningKey(
+      fromUser,
+      signerPublicKey,
+    );
     if (!signingKeyOk) {
       return res.status(403).json({ error: "Signer does not match fromUser" });
     }
@@ -594,7 +608,9 @@ app.post("/link-accept", async (req, res) => {
   );
 
   if (!signatureCheck.ok) {
-    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+    return res
+      .status(signatureCheck.status)
+      .json({ error: signatureCheck.error });
   }
 
   try {
@@ -615,7 +631,10 @@ app.post("/link-accept", async (req, res) => {
 
     const request = requestResult.rows[0];
 
-    const signingKeyOk = await bindOrVerifySigningKey(request.to_user, signerPublicKey);
+    const signingKeyOk = await bindOrVerifySigningKey(
+      request.to_user,
+      signerPublicKey,
+    );
     if (!signingKeyOk) {
       return res.status(403).json({ error: "Signer does not match receiver" });
     }
@@ -673,7 +692,9 @@ app.post("/links/:id/unlink", async (req, res) => {
   );
 
   if (!signatureCheck.ok) {
-    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+    return res
+      .status(signatureCheck.status)
+      .json({ error: signatureCheck.error });
   }
 
   try {
@@ -695,7 +716,9 @@ app.post("/links/:id/unlink", async (req, res) => {
     );
 
     if (membership.rows.length === 0) {
-      return res.status(403).json({ error: "Signer is not a member of this link" });
+      return res
+        .status(403)
+        .json({ error: "Signer is not a member of this link" });
     }
 
     await db.query(
@@ -723,11 +746,14 @@ app.post("/links/:id/unlink", async (req, res) => {
 
 /**
  * 👤 Obtener perfil básico de un usuario
+ * Si no existe todavía, lo crea automáticamente con valores por defecto.
  */
 app.get("/users/:publicKey", async (req, res) => {
   const { publicKey } = req.params;
 
   try {
+    await ensureUser(publicKey);
+
     const result = await db.query(
       `
       SELECT public_key, relationship_preference
@@ -735,7 +761,7 @@ app.get("/users/:publicKey", async (req, res) => {
       WHERE public_key = $1
       LIMIT 1
       `,
-      [publicKey]
+      [publicKey],
     );
 
     if (result.rows.length === 0) {
@@ -772,17 +798,22 @@ app.post("/users/preference", async (req, res) => {
 
   const signatureCheck = verifySignedRequest(
     { publicKey, preference },
-    { signedAt, signerPublicKey, signature }
+    { signedAt, signerPublicKey, signature },
   );
 
   if (!signatureCheck.ok) {
-    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+    return res
+      .status(signatureCheck.status)
+      .json({ error: signatureCheck.error });
   }
 
   try {
     await ensureUser(publicKey);
 
-    const signingKeyOk = await bindOrVerifySigningKey(publicKey, signerPublicKey);
+    const signingKeyOk = await bindOrVerifySigningKey(
+      publicKey,
+      signerPublicKey,
+    );
     if (!signingKeyOk) {
       return res.status(403).json({ error: "Signer does not match user" });
     }
@@ -793,7 +824,7 @@ app.post("/users/preference", async (req, res) => {
       SET relationship_preference = $2
       WHERE public_key = $1
       `,
-      [publicKey, preference]
+      [publicKey, preference],
     );
 
     res.json({ success: true, preference });
