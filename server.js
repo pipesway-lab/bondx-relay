@@ -854,6 +854,99 @@ app.post("/users/preference", async (req, res) => {
 });
 
 /**
+ * 🌿 Obtener awareness items de un vínculo
+ */
+app.get("/awareness/:linkId", async (req, res) => {
+  const linkId = parseInt(req.params.linkId, 10);
+
+  if (Number.isNaN(linkId)) {
+    return res.status(400).json({ error: "Invalid linkId" });
+  }
+
+  try {
+    const result = await db.query(
+      `
+      SELECT *
+      FROM awareness_items
+      WHERE link_id = $1
+        AND archived = false
+      ORDER BY created_at DESC
+      `,
+      [linkId],
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ Error fetching awareness:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 🌿 Crear awareness item
+ */
+app.post("/awareness", async (req, res) => {
+  const {
+    linkId,
+    createdByUserKey,
+    title,
+    impactDescription,
+    supportNeeded,
+  } = req.body;
+
+  if (
+    !linkId ||
+    !createdByUserKey ||
+    !title ||
+    !impactDescription ||
+    !supportNeeded
+  ) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
+  try {
+    const result = await db.query(
+      `
+      INSERT INTO awareness_items
+      (link_id, created_by_user_key, title, impact_description, support_needed)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+      `,
+      [linkId, createdByUserKey, title, impactDescription, supportNeeded],
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ Error creating awareness item:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 🌿 Archivar awareness item
+ */
+app.patch("/awareness/:id/archive", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    await db.query(
+      `
+      UPDATE awareness_items
+      SET archived = true,
+          updated_at = NOW()
+      WHERE id = $1
+      `,
+      [id],
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ Error archiving awareness item:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
  * 🩺 Health check
  */
 app.get("/health", (req, res) => {
