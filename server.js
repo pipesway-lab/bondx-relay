@@ -866,11 +866,19 @@ app.get("/awareness/:linkId", async (req, res) => {
   try {
     const result = await db.query(
       `
-      SELECT *
-      FROM awareness_items
-      WHERE link_id = $1
-        AND archived = false
-      ORDER BY created_at DESC
+      SELECT
+        ai.*,
+        COALESCE(
+          json_agg(aa.user_public_key) FILTER (WHERE aa.user_public_key IS NOT NULL),
+          '[]'
+        ) AS acknowledged_by
+      FROM awareness_items ai
+      LEFT JOIN awareness_acknowledgements aa
+        ON ai.id = aa.awareness_item_id
+      WHERE ai.link_id = $1
+        AND ai.archived = false
+      GROUP BY ai.id
+      ORDER BY ai.created_at DESC
       `,
       [linkId],
     );
@@ -915,9 +923,71 @@ app.post("/awareness", async (req, res) => {
       [linkId, createdByUserKey, title, impactDescription, supportNeeded],
     );
 
-    res.json(result.rows[0]);
+    res.json({
+      ...result.rows[0],
+      acknowledged_by: [],
+    });
   } catch (err) {
     console.error("❌ Error creating awareness item:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 🌿 Marcar awareness item como tenido en cuenta
+ */
+app.post("/awareness/:id/ack", async (req, res) => {
+  const { id } = req.params;
+  const { userPublicKey } = req.body;
+
+  if (!id || !userPublicKey) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
+  try {
+    const itemResult = await db.query(
+      `
+      SELECT *
+      FROM awareness_items
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [id],
+    );
+
+    if (itemResult.rows.length === 0) {
+      return res.status(404).json({ error: "Item not found" });
+    }
+
+    const item = itemResult.rows[0];
+
+    const membership = await db.query(
+      `
+      SELECT 1
+      FROM link_members
+      WHERE link_id = $1
+        AND user_public_key = $2
+      LIMIT 1
+      `,
+      [item.link_id, userPublicKey],
+    );
+
+    if (membership.rows.length === 0) {
+      return res.status(403).json({ error: "Not part of this link" });
+    }
+
+    await db.query(
+      `
+      INSERT INTO awareness_acknowledgements (awareness_item_id, user_public_key)
+      VALUES ($1, $2)
+      ON CONFLICT (awareness_item_id, user_public_key) DO NOTHING
+      `,
+      [id, userPublicKey],
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ ACK awareness error:", err);
     res.status(500).json({ error: "DB error" });
   }
 });
