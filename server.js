@@ -934,6 +934,67 @@ app.post("/awareness", async (req, res) => {
 });
 
 /**
+ * 🌿 Editar awareness item
+ */
+app.patch("/awareness/:id", async (req, res) => {
+  const { id } = req.params;
+  const {
+    userPublicKey,
+    title,
+    impactDescription,
+    supportNeeded,
+  } = req.body;
+
+  if (!userPublicKey || !title || !impactDescription || !supportNeeded) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
+  try {
+    // 1. Verificar que el item existe
+    const existing = await db.query(
+      `
+      SELECT created_by_user_key
+      FROM awareness_items
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [id],
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Item not found" });
+    }
+
+    const item = existing.rows[0];
+
+    // 2. Seguridad: solo el creador puede editar
+    if (item.created_by_user_key !== userPublicKey) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
+    // 3. Update
+    const result = await db.query(
+      `
+      UPDATE awareness_items
+      SET
+        title = $2,
+        impact_description = $3,
+        support_needed = $4,
+        updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [id, title, impactDescription, supportNeeded],
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ PATCH /awareness/:id error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
  * 🌿 Marcar awareness item como tenido en cuenta
  */
 app.post("/awareness/:id/ack", async (req, res) => {
