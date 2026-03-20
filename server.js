@@ -950,7 +950,6 @@ app.patch("/awareness/:id", async (req, res) => {
   }
 
   try {
-    // 1. Verificar que el item existe
     const existing = await db.query(
       `
       SELECT created_by_user_key
@@ -967,12 +966,10 @@ app.patch("/awareness/:id", async (req, res) => {
 
     const item = existing.rows[0];
 
-    // 2. Seguridad: solo el creador puede editar
     if (item.created_by_user_key !== userPublicKey) {
       return res.status(403).json({ error: "Not allowed" });
     }
 
-    // 3. Update
     const result = await db.query(
       `
       UPDATE awareness_items
@@ -1049,6 +1046,196 @@ app.post("/awareness/:id/ack", async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("❌ ACK awareness error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 💬 Crear check-in para un awareness item
+ */
+app.post("/awareness/:id/checkins", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const awarenessResult = await db.query(
+      `
+      SELECT id, archived
+      FROM awareness_items
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [id],
+    );
+
+    if (awarenessResult.rows.length === 0) {
+      return res.status(404).json({ error: "Awareness item not found" });
+    }
+
+    const awarenessItem = awarenessResult.rows[0];
+
+    if (awarenessItem.archived) {
+      return res.status(400).json({ error: "Awareness item is archived" });
+    }
+
+    const activeCheckinResult = await db.query(
+      `
+      SELECT id
+      FROM awareness_checkins
+      WHERE awareness_item_id = $1
+        AND status = 'active'
+      LIMIT 1
+      `,
+      [id],
+    );
+
+    if (activeCheckinResult.rows.length > 0) {
+      return res.json({
+        success: true,
+        alreadyExists: true,
+        checkin: activeCheckinResult.rows[0],
+      });
+    }
+
+    const result = await db.query(
+      `
+      INSERT INTO awareness_checkins (awareness_item_id, question, status)
+      VALUES ($1, $2, 'active')
+      RETURNING *
+      `,
+      [id, "¿Cómo está evolucionando esto últimamente?"],
+    );
+
+    res.json({
+      success: true,
+      checkin: result.rows[0],
+    });
+  } catch (err) {
+    console.error("❌ POST /awareness/:id/checkins error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 💬 Obtener check-ins de un awareness item
+ */
+app.get("/awareness/:id/checkins", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await db.query(
+      `
+      SELECT *
+      FROM awareness_checkins
+      WHERE awareness_item_id = $1
+      ORDER BY created_at DESC
+      `,
+      [id],
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ GET /awareness/:id/checkins error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 💬 Responder a un check-in
+ */
+app.post("/checkins/:id/respond", async (req, res) => {
+  const { id } = req.params;
+  const { userPublicKey, responseText } = req.body;
+
+  if (!userPublicKey || !responseText) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
+  try {
+    const checkinResult = await db.query(
+      `
+      SELECT *
+      FROM awareness_checkins
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [id],
+    );
+
+    if (checkinResult.rows.length === 0) {
+      return res.status(404).json({ error: "Check-in not found" });
+    }
+
+    const checkin = checkinResult.rows[0];
+
+    if (checkin.status !== "active") {
+      return res.status(400).json({ error: "Check-in is not active" });
+    }
+
+    const insertResult = await db.query(
+      `
+      INSERT INTO awareness_checkin_responses (checkin_id, user_public_key, response_text)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (checkin_id, user_public_key)
+      DO UPDATE SET response_text = EXCLUDED.response_text
+      RETURNING *
+      `,
+      [id, userPublicKey, responseText],
+    );
+
+    const responsesCountResult = await db.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM awareness_checkin_responses
+      WHERE checkin_id = $1
+      `,
+      [id],
+    );
+
+    const responsesCount = responsesCountResult.rows[0].count;
+
+    if (responsesCount >= 2) {
+      await db.query(
+        `
+        UPDATE awareness_checkins
+        SET status = 'closed',
+            closed_at = NOW()
+        WHERE id = $1
+        `,
+        [id],
+      );
+    }
+
+    res.json({
+      success: true,
+      response: insertResult.rows[0],
+      closed: responsesCount >= 2,
+    });
+  } catch (err) {
+    console.error("❌ POST /checkins/:id/respond error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 💬 Obtener respuestas de un check-in
+ */
+app.get("/checkins/:id/responses", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await db.query(
+      `
+      SELECT *
+      FROM awareness_checkin_responses
+      WHERE checkin_id = $1
+      ORDER BY created_at ASC
+      `,
+      [id],
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ GET /checkins/:id/responses error:", err);
     res.status(500).json({ error: "DB error" });
   }
 });
