@@ -868,16 +868,25 @@ app.get("/awareness/:linkId", async (req, res) => {
       `
       SELECT
         ai.*,
+
         COALESCE(
-          json_agg(aa.user_public_key) FILTER (WHERE aa.user_public_key IS NOT NULL),
+          json_agg(aa.user_public_key)
+          FILTER (WHERE aa.user_public_key IS NOT NULL),
           '[]'
-        ) AS acknowledged_by
+        ) AS acknowledged_by,
+
+        MAX(aa.created_at) AS last_acknowledged_at
+
       FROM awareness_items ai
+
       LEFT JOIN awareness_acknowledgements aa
         ON ai.id = aa.awareness_item_id
+
       WHERE ai.link_id = $1
         AND ai.archived = false
+
       GROUP BY ai.id
+
       ORDER BY ai.created_at DESC
       `,
       [linkId],
@@ -926,6 +935,7 @@ app.post("/awareness", async (req, res) => {
     res.json({
       ...result.rows[0],
       acknowledged_by: [],
+      last_acknowledged_at: null,
     });
   } catch (err) {
     console.error("❌ Error creating awareness item:", err);
