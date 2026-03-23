@@ -5,11 +5,22 @@ const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
 const nacl = require("tweetnacl");
 const { decodeBase64 } = require("tweetnacl-util");
+const OpenAI = require("openai");
 const db = require("./db");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutos
+
+const AI_PROVIDER = process.env.AI_PROVIDER || "openai";
+const SUMMARY_MODEL = process.env.OPENAI_SUMMARY_MODEL || "gpt-5.4";
+
+const openai =
+  process.env.OPENAI_API_KEY && AI_PROVIDER === "openai"
+    ? new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+      })
+    : null;
 
 /**
  * 🌍 Middleware
@@ -200,6 +211,205 @@ function verifySignedRequest(payloadFields, reqBody) {
     ok: true,
     signerPublicKey,
     signedAt,
+  };
+}
+
+/**
+ * 🤖 Extrae JSON de una respuesta de texto
+ */
+function extractJsonObject(text) {
+  if (!text) {
+    throw new Error("Empty model response");
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    const firstBrace = text.indexOf("{");
+    const lastBrace = text.lastIndexOf("}");
+
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+      throw new Error("No JSON object found in model response");
+    }
+
+    const maybeJson = text.slice(firstBrace, lastBrace + 1);
+    return JSON.parse(maybeJson);
+  }
+}
+
+/**
+ * 🤖 Generar resumen IA de un awareness
+ */
+async function generateAwarenessSummary(context) {
+  if (!openai) {
+    throw new Error("OpenAI not configured");
+  }
+
+  const systemPrompt = `
+Eres un asistente especializado en síntesis relacional y emocional.
+Tu tarea es resumir de forma neutral, empática y no acusatoria la evolución de un tema sensible dentro de una relación.
+
+Debes:
+- mantener un tono sereno y humano
+- no tomar partido
+- no diagnosticar
+- no usar lenguaje clínico
+- no usar un tono terapéutico exagerado
+- identificar señales de mejora, estancamiento o tensión abierta
+- proponer un foco de atención pequeño y práctico
+
+Devuelve SOLO JSON válido con esta forma exacta:
+
+{
+  "trend": "improving" | "stable" | "worsening" | "mixed",
+  "summary": "string",
+  "what_helps": "string",
+  "open_tension": "string",
+  "suggested_focus": "string"
+}
+`.trim();
+
+  const userPrompt = `
+Resume este awareness relacional usando únicamente la información proporcionada.
+
+${JSON.stringify(context, null, 2)}
+`.trim();
+
+  const response = await openai.responses.create({
+    model: SUMMARY_MODEL,
+    input: [
+      {
+        role: "system",
+        content: systemPrompt,
+      },
+      {
+        role: "user",
+        content: userPrompt,
+      },
+    ],
+  });
+
+  const parsed = extractJsonObject(response.output_text);
+
+  const allowedTrends = ["improving", "stable", "worsening", "mixed"];
+
+  if (!allowedTrends.includes(parsed.trend)) {
+    throw new Error("Invalid trend returned by model");
+  }
+
+  const requiredFields = [
+    "trend",
+    "summary",
+    "what_helps",
+    "open_tension",
+    "suggested_focus",
+  ];
+
+  for (const field of requiredFields) {
+    if (
+      typeof parsed[field] !== "string" &&
+      !(field === "trend" && typeof parsed[field] === "string")
+    ) {
+      throw new Error(`Invalid or missing field: ${field}`);
+    }
+  }
+
+  return parsed;
+}
+
+/**
+ * 🤖 Construir contexto para resumen de awareness
+ */
+async function buildAwarenessSummaryContext(awarenessId) {
+  const awarenessResult = await db.query(
+    `
+    SELECT
+      ai.*,
+      COALESCE(
+        json_agg(aa.user_public_key)
+        FILTER (WHERE aa.user_public_key IS NOT NULL),
+        '[]'
+      ) AS acknowledged_by,
+      MAX(aa.created_at) AS last_acknowledged_at
+    FROM awareness_items ai
+    LEFT JOIN awareness_acknowledgements aa
+      ON ai.id = aa.awareness_item_id
+    WHERE ai.id = $1
+    GROUP BY ai.id
+    LIMIT 1
+    `,
+    [awarenessId],
+  );
+
+  if (awarenessResult.rows.length === 0) {
+    throw new Error("Awareness item not found");
+  }
+
+  const awareness = awarenessResult.rows[0];
+
+  const checkinsResult = await db.query(
+    `
+    SELECT *
+    FROM awareness_checkins
+    WHERE awareness_item_id = $1
+    ORDER BY created_at ASC
+    `,
+    [awarenessId],
+  );
+
+  const checkins = checkinsResult.rows;
+
+  const closedCheckins = checkins.filter((checkin) => checkin.status === "closed");
+
+  if (closedCheckins.length === 0) {
+    throw new Error("No closed check-ins available for summary");
+  }
+
+  const history = [];
+
+  for (const checkin of closedCheckins) {
+    const responsesResult = await db.query(
+      `
+      SELECT *
+      FROM awareness_checkin_responses
+      WHERE checkin_id = $1
+      ORDER BY created_at ASC
+      `,
+      [checkin.id],
+    );
+
+    const responses = responsesResult.rows.map((response) => ({
+      role:
+        response.user_public_key === awareness.created_by_user_key
+          ? "creator"
+          : "partner",
+      user_public_key: response.user_public_key,
+      text: response.response_text,
+      created_at: response.created_at,
+    }));
+
+    history.push({
+      checkin_id: checkin.id,
+      date: checkin.created_at,
+      question: checkin.question,
+      responses,
+    });
+  }
+
+  return {
+    awareness: {
+      id: awareness.id,
+      title: awareness.title,
+      impact_description: awareness.impact_description,
+      support_needed: awareness.support_needed,
+      created_at: awareness.created_at,
+      updated_at: awareness.updated_at,
+      created_by_user_key: awareness.created_by_user_key,
+    },
+    acknowledged_by: awareness.acknowledged_by || [],
+    last_acknowledged_at: awareness.last_acknowledged_at,
+    checkins: history,
+    latest_closed_checkin_id: closedCheckins[closedCheckins.length - 1].id,
   };
 }
 
@@ -896,6 +1106,86 @@ app.get("/awareness/:linkId", async (req, res) => {
   } catch (err) {
     console.error("❌ Error fetching awareness:", err);
     res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 🌿 Obtener resúmenes IA de un awareness
+ */
+app.get("/awareness/:id/summaries", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await db.query(
+      `
+      SELECT *
+      FROM awareness_summaries
+      WHERE awareness_item_id = $1
+      ORDER BY created_at DESC
+      `,
+      [id],
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ GET /awareness/:id/summaries error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 🌿 Generar resumen IA de un awareness
+ */
+app.post("/awareness/:id/summary", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const context = await buildAwarenessSummaryContext(id);
+    const summary = await generateAwarenessSummary(context);
+
+    const insertResult = await db.query(
+      `
+      INSERT INTO awareness_summaries
+      (
+        awareness_item_id,
+        trend,
+        summary,
+        what_helps,
+        open_tension,
+        suggested_focus,
+        source_checkin_id
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+      `,
+      [
+        id,
+        summary.trend,
+        summary.summary,
+        summary.what_helps,
+        summary.open_tension,
+        summary.suggested_focus,
+        context.latest_closed_checkin_id,
+      ],
+    );
+
+    res.json(insertResult.rows[0]);
+  } catch (err) {
+    console.error("❌ POST /awareness/:id/summary error:", err);
+
+    if (err.message === "Awareness item not found") {
+      return res.status(404).json({ error: err.message });
+    }
+
+    if (err.message === "No closed check-ins available for summary") {
+      return res.status(400).json({ error: err.message });
+    }
+
+    if (err.message === "OpenAI not configured") {
+      return res.status(500).json({ error: "AI provider not configured" });
+    }
+
+    res.status(500).json({ error: "DB or AI error" });
   }
 });
 
