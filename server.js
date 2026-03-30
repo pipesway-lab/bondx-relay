@@ -439,6 +439,7 @@ app.post("/messages", async (req, res) => {
     ciphertext,
     nonce,
     timestamp,
+    category = "general",
     signedAt,
     signerPublicKey,
     signature,
@@ -449,8 +450,13 @@ app.post("/messages", async (req, res) => {
     return res.status(400).json({ error: "Missing fields" });
   }
 
+  if (!["general", "fuego"].includes(category)) {
+    console.log("❌ Invalid category");
+    return res.status(400).json({ error: "Invalid category" });
+  }
+
   const signatureCheck = verifySignedRequest(
-    { toKey, fromKey, ciphertext, nonce, timestamp },
+    { toKey, fromKey, ciphertext, nonce, timestamp, category },
     { signedAt, signerPublicKey, signature },
   );
 
@@ -477,10 +483,10 @@ app.post("/messages", async (req, res) => {
 
     await db.query(
       `
-      INSERT INTO messages (id, tokey, fromkey, ciphertext, nonce, timestamp)
-      VALUES ($1,$2,$3,$4,$5,$6)
+      INSERT INTO messages (id, tokey, fromkey, ciphertext, nonce, timestamp, category)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
       `,
-      [id, toKey, fromKey, ciphertext, nonce, timestamp],
+      [id, toKey, fromKey, ciphertext, nonce, timestamp, category],
     );
 
     console.log("✅ Mensaje guardado con ID:", id);
