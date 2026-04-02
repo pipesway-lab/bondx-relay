@@ -1024,6 +1024,70 @@ app.get("/users/:publicKey", async (req, res) => {
 });
 
 /**
+ * 🔔 Registrar token push de usuario
+ * Requiere firma
+ */
+app.post("/users/push-token", async (req, res) => {
+  const {
+    publicKey,
+    pushToken,
+    platform,
+    signedAt,
+    signerPublicKey,
+    signature,
+  } = req.body;
+
+  if (!publicKey || !pushToken || !platform) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { publicKey, pushToken, platform },
+    { signedAt, signerPublicKey, signature },
+  );
+
+  if (!signatureCheck.ok) {
+    return res
+      .status(signatureCheck.status)
+      .json({ error: signatureCheck.error });
+  }
+
+  try {
+    await ensureUser(publicKey);
+
+    const signingKeyOk = await bindOrVerifySigningKey(
+      publicKey,
+      signerPublicKey,
+    );
+    if (!signingKeyOk) {
+      return res.status(403).json({ error: "Signer does not match user" });
+    }
+
+    const result = await db.query(
+      `
+      INSERT INTO push_tokens (user_public_key, push_token, platform, updated_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (push_token)
+      DO UPDATE SET
+        user_public_key = EXCLUDED.user_public_key,
+        platform = EXCLUDED.platform,
+        updated_at = NOW()
+      RETURNING id, user_public_key, push_token, platform, created_at, updated_at
+      `,
+      [publicKey, pushToken, platform],
+    );
+
+    res.json({
+      success: true,
+      pushToken: result.rows[0],
+    });
+  } catch (err) {
+    console.error("❌ POST /users/push-token error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
  * ❤️ Actualizar preferencia relacional del usuario
  * Requiere firma
  */
