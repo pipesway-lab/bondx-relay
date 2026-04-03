@@ -1419,8 +1419,38 @@ app.post("/awareness", async (req, res) => {
       [linkId, createdByUserKey, title, impactDescription, supportNeeded],
     );
 
+    const awareness = result.rows[0];
+
+    const membersResult = await db.query(
+      `
+      SELECT user_public_key
+      FROM link_members
+      WHERE link_id = $1
+      `,
+      [linkId],
+    );
+
+    const partnerKey = membersResult.rows
+      .map((r) => r.user_public_key)
+      .find((k) => k !== createdByUserKey);
+
+    if (partnerKey) {
+      const tokens = await getPushTokensByUser(partnerKey);
+
+      await sendExpoPushNotification({
+        to: tokens,
+        title: "BOND",
+        body: "Tu pareja ha compartido algo importante.",
+        data: {
+          type: "awareness_created",
+          awarenessId: awareness.id,
+          screen: "awareness",
+        },
+      });
+    }
+
     res.json({
-      ...result.rows[0],
+      ...awareness,
       acknowledged_by: [],
       last_acknowledged_at: null,
     });
@@ -1516,7 +1546,7 @@ app.post("/awareness/:id/ack", async (req, res) => {
 
     const item = itemResult.rows[0];
 
-    const membership = await db.query(
+    const membershipCheck = await db.query(
       `
       SELECT 1
       FROM link_members
@@ -1527,7 +1557,7 @@ app.post("/awareness/:id/ack", async (req, res) => {
       [item.link_id, userPublicKey],
     );
 
-    if (membership.rows.length === 0) {
+    if (membershipCheck.rows.length === 0) {
       return res.status(403).json({ error: "Not part of this link" });
     }
 
@@ -1539,6 +1569,23 @@ app.post("/awareness/:id/ack", async (req, res) => {
       `,
       [id, userPublicKey],
     );
+
+    const creatorKey = item.created_by_user_key;
+
+    if (creatorKey && creatorKey !== userPublicKey) {
+      const tokens = await getPushTokensByUser(creatorKey);
+
+      await sendExpoPushNotification({
+        to: tokens,
+        title: "BOND",
+        body: "Tu pareja ha tenido en cuenta uno de tus puntos de cuidado.",
+        data: {
+          type: "awareness_ack",
+          awarenessId: id,
+          screen: "awareness",
+        },
+      });
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -1556,7 +1603,7 @@ app.post("/awareness/:id/checkins", async (req, res) => {
   try {
     const awarenessResult = await db.query(
       `
-      SELECT id, archived
+      SELECT *
       FROM awareness_items
       WHERE id = $1
       LIMIT 1
@@ -1602,9 +1649,40 @@ app.post("/awareness/:id/checkins", async (req, res) => {
       [id, "¿Cómo está evolucionando esto últimamente?"],
     );
 
+    const checkin = result.rows[0];
+
+    const membersResult = await db.query(
+      `
+      SELECT user_public_key
+      FROM link_members
+      WHERE link_id = $1
+      `,
+      [awarenessItem.link_id],
+    );
+
+    const partnerKey = membersResult.rows
+      .map((r) => r.user_public_key)
+      .find((k) => k !== awarenessItem.created_by_user_key);
+
+    if (partnerKey) {
+      const tokens = await getPushTokensByUser(partnerKey);
+
+      await sendExpoPushNotification({
+        to: tokens,
+        title: "BOND",
+        body: "Tienes una revisión disponible.",
+        data: {
+          type: "awareness_checkin_available",
+          awarenessId: id,
+          checkinId: checkin.id,
+          screen: "awareness",
+        },
+      });
+    }
+
     res.json({
       success: true,
-      checkin: result.rows[0],
+      checkin,
     });
   } catch (err) {
     console.error("❌ POST /awareness/:id/checkins error:", err);
@@ -1690,6 +1768,36 @@ app.post("/checkins/:id/respond", async (req, res) => {
 
     const responsesCount = responsesCountResult.rows[0].count;
 
+    const awarenessResult = await db.query(
+      `
+      SELECT ai.*, lm.user_public_key
+      FROM awareness_items ai
+      JOIN link_members lm ON lm.link_id = ai.link_id
+      WHERE ai.id = $1
+      `,
+      [checkin.awareness_item_id],
+    );
+
+    const partnerKey = awarenessResult.rows
+      .map((r) => r.user_public_key)
+      .find((k) => k !== userPublicKey);
+
+    if (responsesCount === 1 && partnerKey) {
+      const tokens = await getPushTokensByUser(partnerKey);
+
+      await sendExpoPushNotification({
+        to: tokens,
+        title: "BOND",
+        body: "Tu pareja ha completado su parte de la revisión.",
+        data: {
+          type: "checkin_partner_responded",
+          checkinId: id,
+          awarenessId: checkin.awareness_item_id,
+          screen: "awareness",
+        },
+      });
+    }
+
     if (responsesCount >= 2) {
       await db.query(
         `
@@ -1700,6 +1808,22 @@ app.post("/checkins/:id/respond", async (req, res) => {
         `,
         [id],
       );
+
+      if (partnerKey) {
+        const tokens = await getPushTokensByUser(partnerKey);
+
+        await sendExpoPushNotification({
+          to: tokens,
+          title: "BOND",
+          body: "Ya tenéis una nueva lectura compartida disponible.",
+          data: {
+            type: "checkin_closed",
+            checkinId: id,
+            awarenessId: checkin.awareness_item_id,
+            screen: "awareness",
+          },
+        });
+      }
     }
 
     res.json({
