@@ -167,6 +167,25 @@ async function getPushTokensByUser(userPublicKey) {
 }
 
 /**
+ * 👥 Obtener la pareja de un usuario si existe vínculo activo
+ */
+async function getLinkedPartnerPublicKey(userPublicKey) {
+  const result = await db.query(
+    `
+    SELECT lm2.user_public_key AS partner_public_key
+    FROM link_members lm1
+    JOIN link_members lm2 ON lm1.link_id = lm2.link_id
+    WHERE lm1.user_public_key = $1
+      AND lm2.user_public_key <> $1
+    LIMIT 1
+    `,
+    [userPublicKey],
+  );
+
+  return result.rows.length > 0 ? result.rows[0].partner_public_key : null;
+}
+
+/**
  * 🔔 Eliminar push token inválido
  */
 async function deletePushToken(pushToken) {
@@ -192,7 +211,8 @@ async function sendExpoPushNotification({ to, title, body, data = {} }) {
   }
 
   const validTokens = to.filter(
-    (token) => typeof token === "string" && token.startsWith("ExponentPushToken"),
+    (token) =>
+      typeof token === "string" && token.startsWith("ExponentPushToken"),
   );
 
   if (validTokens.length === 0) {
@@ -465,7 +485,9 @@ async function buildAwarenessSummaryContext(awarenessId) {
 
   const checkins = checkinsResult.rows;
 
-  const closedCheckins = checkins.filter((checkin) => checkin.status === "closed");
+  const closedCheckins = checkins.filter(
+    (checkin) => checkin.status === "closed",
+  );
 
   if (closedCheckins.length === 0) {
     throw new Error("No closed check-ins available for summary");
@@ -1252,6 +1274,23 @@ app.post("/users/preference", async (req, res) => {
       `,
       [publicKey, preference],
     );
+
+    const partnerKey = await getLinkedPartnerPublicKey(publicKey);
+
+    if (partnerKey) {
+      const tokens = await getPushTokensByUser(partnerKey);
+
+      await sendExpoPushNotification({
+        to: tokens,
+        title: "BOND",
+        body: "Tu pareja ha actualizado su tipo de vínculo.",
+        data: {
+          type: "relationship_preference_changed",
+          preference,
+          screen: "index",
+        },
+      });
+    }
 
     res.json({ success: true, preference });
   } catch (err) {
