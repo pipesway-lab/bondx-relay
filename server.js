@@ -14,6 +14,7 @@ const SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutos
 
 const AI_PROVIDER = process.env.AI_PROVIDER || "openai";
 const SUMMARY_MODEL = process.env.OPENAI_SUMMARY_MODEL || "gpt-5.4";
+const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 
 const openai =
   process.env.OPENAI_API_KEY && AI_PROVIDER === "openai"
@@ -146,6 +147,98 @@ async function getUserBySigningPublicKey(signerPublicKey) {
   );
 
   return result.rows.length > 0 ? result.rows[0].public_key : null;
+}
+
+/**
+ * 🔔 Obtener push tokens de un usuario
+ */
+async function getPushTokensByUser(userPublicKey) {
+  const result = await db.query(
+    `
+    SELECT push_token
+    FROM push_tokens
+    WHERE user_public_key = $1
+    ORDER BY updated_at DESC
+    `,
+    [userPublicKey],
+  );
+
+  return result.rows.map((row) => row.push_token).filter(Boolean);
+}
+
+/**
+ * 🔔 Eliminar push token inválido
+ */
+async function deletePushToken(pushToken) {
+  try {
+    await db.query(
+      `
+      DELETE FROM push_tokens
+      WHERE push_token = $1
+      `,
+      [pushToken],
+    );
+  } catch (err) {
+    console.error("❌ Error deleting invalid push token:", err);
+  }
+}
+
+/**
+ * 🔔 Enviar push notification vía Expo
+ */
+async function sendExpoPushNotification({ to, title, body, data = {} }) {
+  if (!to || !Array.isArray(to) || to.length === 0) {
+    return;
+  }
+
+  const validTokens = to.filter(
+    (token) => typeof token === "string" && token.startsWith("ExponentPushToken"),
+  );
+
+  if (validTokens.length === 0) {
+    console.log("ℹ️ No valid Expo push tokens found");
+    return;
+  }
+
+  const messages = validTokens.map((token) => ({
+    to: token,
+    sound: "default",
+    title,
+    body,
+    data,
+  }));
+
+  try {
+    const response = await fetch(EXPO_PUSH_URL, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Accept-Encoding": "gzip, deflate",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(messages),
+    });
+
+    const result = await response.json();
+    console.log("🔔 Expo push response:", JSON.stringify(result));
+
+    if (Array.isArray(result?.data)) {
+      for (let i = 0; i < result.data.length; i += 1) {
+        const item = result.data[i];
+        const token = validTokens[i];
+
+        if (
+          item?.status === "error" &&
+          item?.details?.error === "DeviceNotRegistered"
+        ) {
+          console.log("🧹 Removing unregistered Expo push token:", token);
+          await deletePushToken(token);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("❌ Error sending Expo push notification:", err);
+  }
 }
 
 /**
@@ -490,6 +583,25 @@ app.post("/messages", async (req, res) => {
     );
 
     console.log("✅ Mensaje guardado con ID:", id);
+
+    const receiverPushTokens = await getPushTokensByUser(toKey);
+
+    if (receiverPushTokens.length > 0) {
+      await sendExpoPushNotification({
+        to: receiverPushTokens,
+        title: "BOND",
+        body: "Tienes un nuevo mensaje.",
+        data: {
+          type: "chat_message",
+          category,
+          screen: "chat",
+          fromKey,
+          messageId: id,
+        },
+      });
+    } else {
+      console.log("ℹ️ No push tokens found for recipient:", toKey);
+    }
 
     res.json({ success: true, id });
   } catch (err) {
@@ -1076,6 +1188,8 @@ app.post("/users/push-token", async (req, res) => {
       `,
       [publicKey, pushToken, platform],
     );
+
+    console.log("✅ Push token guardado para:", publicKey, platform);
 
     res.json({
       success: true,
