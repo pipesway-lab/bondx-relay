@@ -23,6 +23,9 @@ const openai =
       })
     : null;
 
+const { PutObjectCommand } = require("@aws-sdk/client-s3");
+const r2 = require("./src/storage/r2Client").default;
+
 /**
  * 🌍 Middleware
  */
@@ -1921,6 +1924,66 @@ app.patch("/awareness/:id/archive", async (req, res) => {
   } catch (err) {
     console.error("❌ Error archiving awareness item:", err);
     res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 🖼️ Subir imagen de chat a Cloudflare R2
+ */
+app.post("/uploads/chat-image", async (req, res) => {
+  try {
+    const { base64, mimeType } = req.body;
+
+    if (!base64 || !mimeType) {
+      return res.status(400).json({ error: "Missing image data" });
+    }
+
+    const allowedMimeTypes = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+
+    if (!allowedMimeTypes.includes(mimeType)) {
+      return res.status(400).json({ error: "Unsupported image type" });
+    }
+
+    const cleanBase64 = String(base64).replace(/^data:.+;base64,/, "");
+    const buffer = Buffer.from(cleanBase64, "base64");
+
+    const maxSizeBytes = 8 * 1024 * 1024; // 8 MB
+    if (buffer.length > maxSizeBytes) {
+      return res.status(400).json({ error: "Image too large" });
+    }
+
+    const extensionMap = {
+      "image/jpeg": "jpg",
+      "image/jpg": "jpg",
+      "image/png": "png",
+      "image/webp": "webp",
+    };
+
+    const extension = extensionMap[mimeType] || "jpg";
+
+    const key = `chat/${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 10)}.${extension}`;
+
+    await r2.send(
+      new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: key,
+        Body: buffer,
+        ContentType: mimeType,
+      }),
+    );
+
+    const publicUrl = `${process.env.R2_PUBLIC_URL}/${key}`;
+
+    return res.json({
+      success: true,
+      key,
+      url: publicUrl,
+    });
+  } catch (err) {
+    console.error("❌ POST /uploads/chat-image error:", err);
+    return res.status(500).json({ error: "Upload failed" });
   }
 });
 
