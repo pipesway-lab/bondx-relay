@@ -24,7 +24,7 @@ const openai =
     : null;
 
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
-const r2 = require("./src/storage/r2Client").default;
+const r2 = require("./storage/r2Client");
 
 /**
  * 🌍 Middleware
