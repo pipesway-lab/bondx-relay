@@ -35,7 +35,8 @@ app.use(
   }),
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 /**
  * 🔐 Verificar si dos usuarios pertenecen al mismo vínculo
@@ -1938,7 +1939,12 @@ app.post("/uploads/chat-image", async (req, res) => {
       return res.status(400).json({ error: "Missing image data" });
     }
 
-    const allowedMimeTypes = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+    const allowedMimeTypes = [
+      "image/jpeg",
+      "image/jpg",
+      "image/png",
+      "image/webp",
+    ];
 
     if (!allowedMimeTypes.includes(mimeType)) {
       return res.status(400).json({ error: "Unsupported image type" });
@@ -1947,7 +1953,7 @@ app.post("/uploads/chat-image", async (req, res) => {
     const cleanBase64 = String(base64).replace(/^data:.+;base64,/, "");
     const buffer = Buffer.from(cleanBase64, "base64");
 
-    const maxSizeBytes = 8 * 1024 * 1024; // 8 MB
+    const maxSizeBytes = 12 * 1024 * 1024; // 12 MB
     if (buffer.length > maxSizeBytes) {
       return res.status(400).json({ error: "Image too large" });
     }
