@@ -2012,7 +2012,7 @@ app.post("/uploads/delete-chat-image", async (req, res) => {
     // extraer key desde URL pública
     const key = url.replace(`${baseUrl}/`, "");
 
-    await s3.send(
+    await r2.send(
       new DeleteObjectCommand({
         Bucket: process.env.R2_BUCKET,
         Key: key,
