@@ -26,6 +26,8 @@ const openai =
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
 const r2 = require("./storage/r2Client");
 
+const { DeleteObjectCommand } = require("@aws-sdk/client-s3");
+
 /**
  * 🌍 Middleware
  */
@@ -1990,6 +1992,40 @@ app.post("/uploads/chat-image", async (req, res) => {
   } catch (err) {
     console.error("❌ POST /uploads/chat-image error:", err);
     return res.status(500).json({ error: "Upload failed" });
+  }
+});
+
+app.post("/uploads/delete-chat-image", async (req, res) => {
+  try {
+    const { url } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ error: "Missing url" });
+    }
+
+    const baseUrl = process.env.R2_PUBLIC_URL;
+
+    if (!url.startsWith(baseUrl)) {
+      return res.status(400).json({ error: "Invalid URL" });
+    }
+
+    // extraer key desde URL pública
+    const key = url.replace(`${baseUrl}/`, "");
+
+    await s3.send(
+      new DeleteObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: key,
+      })
+    );
+
+    console.log("🗑️ Deleted image from R2:", key);
+
+    res.json({ success: true });
+
+  } catch (err) {
+    console.error("❌ delete image error:", err);
+    res.status(500).json({ error: "Delete failed" });
   }
 });
 
