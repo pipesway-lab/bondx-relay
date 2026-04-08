@@ -399,19 +399,46 @@ Principios:
 - identifica posibles diferencias de percepción entre ambas personas
 - propón un foco de atención pequeño, concreto y realista
 
-Además de la lectura principal, genera posibles capas emocionales o sensibilidades más profundas que podrían estar influyendo en la situación.
+Además de la lectura principal, sugiere posibles experiencias emocionales más profundas que podrían estar influyendo en la situación.
 
-Reglas para esas posibles capas:
-- usa lenguaje tentativo y humano
-- no las presentes como una verdad
-- no uses términos técnicos como "emoción primaria"
+Objetivo:
+identificar emociones nucleares o sensibilidades emocionales básicas que podrían estar activándose bajo el conflicto.
+
+Reglas para estas posibles capas emocionales:
+
+- expresa emociones o experiencias emocionales breves
+- usa entre 1 y 5 palabras
+- evita frases largas o explicaciones
+- evita consejos o interpretaciones cognitivas
+- evita reformular el problema
 - no diagnostiques
 - no menciones trauma
-- deben ser breves, naturales y relacionales
-- máximo 4 elementos
-- si el contexto es débil, devuelve un array vacío
-- evita palabras demasiado genéricas sueltas como "tristeza" o "rabia"
-- prefiere expresiones como "miedo a perder conexión", "sentirse poco importante", "presión por responder bien"
+- no uses términos técnicos como "emoción primaria"
+- deben sonar naturales y humanas
+- pueden combinar emoción + contexto breve
+
+Formato esperado:
+- máximo 3 a 6 elementos
+- cada elemento debe ser corto y claro
+- no usar frases complejas
+- no usar lenguaje clínico
+
+Ejemplos adecuados:
+- miedo a desconexión
+- sentirse poco importante
+- inseguridad
+- vulnerabilidad
+- sensación de soledad
+- miedo a rechazo
+- tristeza
+- sensación de distancia emocional
+- sentirse no priorizado
+- temor a no ser comprendido
+
+Si el contexto es insuficiente, devuelve un array vacío.
+
+Devuelve el resultado como array de strings en:
+possible_deeper_layers
 
 El insight debe ayudar a la pareja a comprender mejor lo que está ocurriendo y ajustar algo de forma práctica.
 
