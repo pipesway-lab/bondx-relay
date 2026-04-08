@@ -23,10 +23,8 @@ const openai =
       })
     : null;
 
-const { PutObjectCommand } = require("@aws-sdk/client-s3");
+const { PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const r2 = require("./storage/r2Client");
-
-const { DeleteObjectCommand } = require("@aws-sdk/client-s3");
 
 /**
  * 🌍 Middleware
@@ -357,6 +355,21 @@ function extractJsonObject(text) {
 }
 
 /**
+ * 🤖 Normaliza possible_deeper_layers
+ */
+function normalizePossibleDeeperLayers(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item) => typeof item === "string")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .slice(0, 4);
+}
+
+/**
  * 🤖 Generar resumen IA de un awareness
  */
 async function generateAwarenessSummary(context) {
@@ -367,28 +380,40 @@ async function generateAwarenessSummary(context) {
   const systemPrompt = `
 Eres un facilitador experto en comunicación de pareja.
 
-Tu tarea es sintetizar la evolución de un tema sensible de forma:
-clara, equilibrada y útil para el cuidado mutuo y contextualizar toda la información y enmarcarla dentro de una historia del ecosistema emocional de la relación..
+Tu tarea es sintetizar la evolución de un tema sensible de forma clara, equilibrada y útil para el cuidado mutuo, contextualizando la información dentro de la historia emocional de la relación.
 
 Principios:
-- redactar el contenido en una voz cercana y compartida pero ante todo muy natural, usa un lenguaje coloquial que no suene a evaluación
-- preferir primera persona del plural cuando sea natural ("nos", "estamos", "puede ayudarnos")
-- evitar tono de informe externo o análisis en tercera persona
-- mantener prudencia: no asumir acuerdos o mejoras que no estén respaldados por la información
+- redacta en una voz cercana, compartida y natural
+- prefiere primera persona del plural cuando sea natural ("nos", "estamos", "puede ayudarnos")
+- evita tono de informe externo o análisis en tercera persona
+- mantén prudencia: no asumas acuerdos o mejoras que no estén respaldados por la información
 - tono empático, humano y respetuoso
-- no tomar partido
-- no culpar ni juzgar
-- no diagnosticar ni usar lenguaje clínico
-- evitar frases genéricas de autoayuda
-- no sonar excesivamente terapéutico
+- no tomes partido
+- no culpes ni juzgues
+- no diagnostiques ni uses lenguaje clínico
+- evita frases genéricas de autoayuda
+- no suenes excesivamente terapéutico
 - basarte solo en la información proporcionada
-- detectar si hay señales de mejora, estancamiento, tensión o ambivalencia
-- reconocer avances aunque sean pequeños
-- identificar posibles diferencias de percepción entre ambas personas
-- proponer un foco de atención pequeño, concreto y realista
+- detecta señales de mejora, estancamiento, tensión o ambivalencia
+- reconoce avances aunque sean pequeños
+- identifica posibles diferencias de percepción entre ambas personas
+- propón un foco de atención pequeño, concreto y realista
 
-El insight debe ayudar a la pareja a:
-comprender mejor lo que está ocurriendo y ajustar algo de forma práctica.
+Además de la lectura principal, genera posibles capas emocionales o sensibilidades más profundas que podrían estar influyendo en la situación.
+
+Reglas para esas posibles capas:
+- usa lenguaje tentativo y humano
+- no las presentes como una verdad
+- no uses términos técnicos como "emoción primaria"
+- no diagnostiques
+- no menciones trauma
+- deben ser breves, naturales y relacionales
+- máximo 4 elementos
+- si el contexto es débil, devuelve un array vacío
+- evita palabras demasiado genéricas sueltas como "tristeza" o "rabia"
+- prefiere expresiones como "miedo a perder conexión", "sentirse poco importante", "presión por responder bien"
+
+El insight debe ayudar a la pareja a comprender mejor lo que está ocurriendo y ajustar algo de forma práctica.
 
 Devuelve SOLO JSON válido con esta forma exacta:
 
@@ -397,7 +422,11 @@ Devuelve SOLO JSON válido con esta forma exacta:
   "summary": "síntesis breve de lo que parece estar ocurriendo",
   "what_helps": "qué parece contribuir a que la situación mejore o se estabilice",
   "open_tension": "qué aspecto sigue generando fricción o incertidumbre",
-  "suggested_focus": "una sugerencia pequeña y concreta de atención o ajuste"
+  "suggested_focus": "una sugerencia pequeña y concreta de atención o ajuste",
+  "possible_deeper_layers": [
+    "posible capa 1",
+    "posible capa 2"
+  ]
 }
 `.trim();
 
@@ -438,15 +467,21 @@ ${JSON.stringify(context, null, 2)}
   ];
 
   for (const field of requiredFields) {
-    if (
-      typeof parsed[field] !== "string" &&
-      !(field === "trend" && typeof parsed[field] === "string")
-    ) {
+    if (typeof parsed[field] !== "string") {
       throw new Error(`Invalid or missing field: ${field}`);
     }
   }
 
-  return parsed;
+  return {
+    trend: parsed.trend,
+    summary: parsed.summary,
+    what_helps: parsed.what_helps,
+    open_tension: parsed.open_tension,
+    suggested_focus: parsed.suggested_focus,
+    possible_deeper_layers: normalizePossibleDeeperLayers(
+      parsed.possible_deeper_layers,
+    ),
+  };
 }
 
 /**
@@ -1411,7 +1446,10 @@ app.post("/awareness/:id/summary", async (req, res) => {
       ],
     );
 
-    res.json(insertResult.rows[0]);
+    res.json({
+      ...insertResult.rows[0],
+      possible_deeper_layers: summary.possible_deeper_layers,
+    });
   } catch (err) {
     console.error("❌ POST /awareness/:id/summary error:", err);
 
@@ -2009,20 +2047,18 @@ app.post("/uploads/delete-chat-image", async (req, res) => {
       return res.status(400).json({ error: "Invalid URL" });
     }
 
-    // extraer key desde URL pública
     const key = url.replace(`${baseUrl}/`, "");
 
     await r2.send(
       new DeleteObjectCommand({
         Bucket: process.env.R2_BUCKET,
         Key: key,
-      })
+      }),
     );
 
     console.log("🗑️ Deleted image from R2:", key);
 
     res.json({ success: true });
-
   } catch (err) {
     console.error("❌ delete image error:", err);
     res.status(500).json({ error: "Delete failed" });
