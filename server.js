@@ -422,6 +422,7 @@ Formato esperado:
 - cada elemento debe ser corto y claro
 - no usar frases complejas
 - no usar lenguaje clínico
+- no deben expresar género (masculino o femenino)
 
 Ejemplos adecuados:
 - miedo a desconexión
