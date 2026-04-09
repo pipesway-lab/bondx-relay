@@ -1454,6 +1454,99 @@ app.get("/awareness/:id/summaries", async (req, res) => {
 });
 
 /**
+ * 🌿 Obtener selección emocional de un summary para un usuario
+ */
+app.get("/awareness/summaries/:id/emotional-signals", async (req, res) => {
+  const { id } = req.params;
+  const { userPublicKey } = req.query;
+
+  if (!userPublicKey || typeof userPublicKey !== "string") {
+    return res.status(400).json({ error: "Missing userPublicKey" });
+  }
+
+  try {
+    const result = await db.query(
+      `
+      SELECT id, summary_id, user_public_key, selected_layers, created_at, updated_at
+      FROM awareness_summary_emotional_signals
+      WHERE summary_id = $1
+        AND user_public_key = $2
+      LIMIT 1
+      `,
+      [id, userPublicKey],
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({
+        summary_id: id,
+        user_public_key: userPublicKey,
+        selected_layers: [],
+      });
+    }
+
+    return res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ GET /awareness/summaries/:id/emotional-signals error:", err);
+    return res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * 🌿 Guardar selección emocional de un summary para un usuario
+ */
+app.post("/awareness/summaries/:id/emotional-signals", async (req, res) => {
+  const { id } = req.params;
+  const { userPublicKey, selectedLayers } = req.body;
+
+  if (!userPublicKey) {
+    return res.status(400).json({ error: "Missing userPublicKey" });
+  }
+
+  const normalizedLayers = normalizeSelectedLayers(selectedLayers);
+
+  try {
+    const summaryExists = await db.query(
+      `
+      SELECT id
+      FROM awareness_summaries
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [id],
+    );
+
+    if (summaryExists.rows.length === 0) {
+      return res.status(404).json({ error: "Summary not found" });
+    }
+
+    const result = await db.query(
+      `
+      INSERT INTO awareness_summary_emotional_signals
+      (
+        summary_id,
+        user_public_key,
+        selected_layers,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3::jsonb, NOW(), NOW())
+      ON CONFLICT (summary_id, user_public_key)
+      DO UPDATE SET
+        selected_layers = EXCLUDED.selected_layers,
+        updated_at = NOW()
+      RETURNING id, summary_id, user_public_key, selected_layers, created_at, updated_at
+      `,
+      [id, userPublicKey, JSON.stringify(normalizedLayers)],
+    );
+
+    return res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ POST /awareness/summaries/:id/emotional-signals error:", err);
+    return res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
  * 🌿 Generar resumen IA de un awareness
  */
 app.post("/awareness/:id/summary", async (req, res) => {
