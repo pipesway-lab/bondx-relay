@@ -355,6 +355,21 @@ function extractJsonObject(text) {
 }
 
 /**
+ * 🤖 Normaliza selected_layers recibidas desde frontend
+ */
+function normalizeSelectedLayers(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item) => typeof item === "string")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .slice(0, 12);
+}
+
+/**
  * 🤖 Normaliza possible_deeper_layers
  */
 function normalizePossibleDeeperLayers(value) {
