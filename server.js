@@ -214,10 +214,14 @@ async function sendExpoPushNotification({ to, title, body, data = {} }) {
     return;
   }
 
-  const validTokens = to.filter(
-    (token) =>
-      typeof token === "string" && token.startsWith("ExponentPushToken"),
-  );
+ const validTokens = to.filter(
+  (token) =>
+    typeof token === "string" &&
+    (
+      token.startsWith("ExpoPushToken[") ||
+      token.startsWith("ExponentPushToken[")
+    )
+); 
 
   if (validTokens.length === 0) {
     console.log("ℹ️ No valid Expo push tokens found");
