@@ -214,14 +214,12 @@ async function sendExpoPushNotification({ to, title, body, data = {} }) {
     return;
   }
 
- const validTokens = to.filter(
-  (token) =>
-    typeof token === "string" &&
-    (
-      token.startsWith("ExpoPushToken[") ||
-      token.startsWith("ExponentPushToken[")
-    )
-); 
+  const validTokens = to.filter(
+    (token) =>
+      typeof token === "string" &&
+      (token.startsWith("ExpoPushToken[") ||
+        token.startsWith("ExponentPushToken[")),
+  );
 
   if (validTokens.length === 0) {
     console.log("ℹ️ No valid Expo push tokens found");
@@ -705,6 +703,7 @@ app.post("/messages", async (req, res) => {
           type: "chat_message",
           category,
           screen: "chat",
+          url: "/chat",
           fromKey,
           messageId: id,
         },
@@ -1376,6 +1375,7 @@ app.post("/users/preference", async (req, res) => {
           type: "relationship_preference_changed",
           preference,
           screen: "index",
+          url: "/",
         },
       });
     }
@@ -1668,6 +1668,7 @@ app.post("/awareness", async (req, res) => {
           type: "awareness_created",
           awarenessId: awareness.id,
           screen: "awareness",
+          url: "/awareness",
         },
       });
     }
@@ -1806,6 +1807,7 @@ app.post("/awareness/:id/ack", async (req, res) => {
           type: "awareness_ack",
           awarenessId: id,
           screen: "awareness",
+          url: "/awareness",
         },
       });
     }
@@ -1899,6 +1901,7 @@ app.post("/awareness/:id/checkins", async (req, res) => {
           awarenessId: id,
           checkinId: checkin.id,
           screen: "awareness",
+          url: "/awareness",
         },
       });
     }
@@ -2017,6 +2020,7 @@ app.post("/checkins/:id/respond", async (req, res) => {
           checkinId: id,
           awarenessId: checkin.awareness_item_id,
           screen: "awareness",
+          url: "/awareness",
         },
       });
     }
@@ -2044,6 +2048,7 @@ app.post("/checkins/:id/respond", async (req, res) => {
             checkinId: id,
             awarenessId: checkin.awareness_item_id,
             screen: "awareness",
+            url: "/awareness",
           },
         });
       }
