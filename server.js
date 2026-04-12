@@ -785,6 +785,36 @@ app.get("/messages/:publicKey", async (req, res) => {
 });
 
 /**
+ * 🔴 Obtener número de mensajes no leídos
+ */
+app.get("/messages/unread/:publicKey", async (req, res) => {
+  const { publicKey } = req.params;
+
+  try {
+    const result = await db.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM messages
+      WHERE tokey = $1
+        AND read_at IS NULL
+      `,
+      [publicKey],
+    );
+
+    res.json({
+      count: result.rows[0]?.count ?? 0,
+    });
+  } catch (err) {
+    console.error("❌ GET /messages/unread/:publicKey error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+
+
+
+
+/**
  * ✅ Marcar mensaje como entregado
  * Solo hace ACK si el mensaje pertenece a usuarios que siguen vinculados.
  */
@@ -1432,6 +1462,46 @@ app.get("/awareness/:linkId", async (req, res) => {
     res.status(500).json({ error: "DB error" });
   }
 });
+
+
+/**
+ * 🔴 Obtener badge de awareness para un usuario
+ * Cuenta awareness items no archivados que el usuario aún no ha marcado como tenidos en cuenta.
+ */
+app.get("/awareness/badge/:linkId/:userKey", async (req, res) => {
+  const linkId = parseInt(req.params.linkId, 10);
+  const { userKey } = req.params;
+
+  if (Number.isNaN(linkId)) {
+    return res.status(400).json({ error: "Invalid linkId" });
+  }
+
+  try {
+    const result = await db.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM awareness_items ai
+      WHERE ai.link_id = $1
+        AND ai.archived = false
+        AND NOT EXISTS (
+          SELECT 1
+          FROM awareness_acknowledgements aa
+          WHERE aa.awareness_item_id = ai.id
+            AND aa.user_public_key = $2
+        )
+      `,
+      [linkId, userKey],
+    );
+
+    res.json({
+      count: result.rows[0]?.count ?? 0,
+    });
+  } catch (err) {
+    console.error("❌ GET /awareness/badge/:linkId/:userKey error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
 
 /**
  * 🌿 Obtener resúmenes IA de un awareness
