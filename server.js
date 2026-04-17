@@ -1432,6 +1432,7 @@ app.get("/awareness/badge/:linkId/:userKey", async (req, res) => {
       FROM awareness_items ai
       WHERE ai.link_id = $1
         AND ai.archived = false
+        AND ai.created_by_user_key != $2
         AND NOT EXISTS (
           SELECT 1
           FROM awareness_acknowledgements aa
