@@ -2276,6 +2276,127 @@ app.post("/uploads/delete-chat-image", async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// 🧠 MAPA EMOCIONAL — Clasificación Plutchik via IA
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * POST /emotional-map/classify
+ * Clasifica un chip emocional en la rueda de Plutchik usando IA.
+ * Si el chip ya existe para ese usuario, incrementa count.
+ * Body: { userPublicKey, chipText, sourceSummaryId? }
+ */
+app.post("/emotional-map/classify", async (req, res) => {
+  const { userPublicKey, chipText, sourceSummaryId } = req.body;
+
+  if (!userPublicKey || !chipText) {
+    return res.status(400).json({ error: "userPublicKey and chipText are required" });
+  }
+
+  if (!openai) {
+    return res.status(503).json({ error: "OpenAI not configured" });
+  }
+
+  try {
+    // 1. Clasificar con IA
+    const response = await openai.responses.create({
+      model: SUMMARY_MODEL,
+      input: [
+        {
+          role: "system",
+          content: `Eres un psicólogo experto en la rueda de emociones de Plutchik.
+Tu tarea es clasificar una señal emocional en una de las 8 emociones primarias de Plutchik y en uno de sus 3 anillos de intensidad.
+
+Emociones válidas: joy, trust, fear, surprise, sadness, disgust, anger, anticipation
+Anillos:
+- ring 1 = intensa (éxtasis, admiración, terror, asombro, pena, aversión, furia, vigilancia)
+- ring 2 = media   (alegría, confianza, miedo, sorpresa, tristeza, disgusto, ira, anticipación)
+- ring 3 = suave   (serenidad, aceptación, aprensión, distracción, melancolía, aburrimiento, molestia, interés)
+
+Responde ÚNICAMENTE con JSON válido, sin texto adicional, sin markdown:
+{ "emotion": "fear", "ring": 2 }`,
+        },
+        {
+          role: "user",
+          content: `Clasifica esta señal emocional: "${chipText}"`,
+        },
+      ],
+    });
+
+    const parsed = extractJsonObject(response.output_text);
+
+    const validEmotions = ["joy","trust","fear","surprise","sadness","disgust","anger","anticipation"];
+    const validRings    = [1, 2, 3];
+
+    if (!validEmotions.includes(parsed.emotion) || !validRings.includes(Number(parsed.ring))) {
+      throw new Error(`Invalid classification returned: ${JSON.stringify(parsed)}`);
+    }
+
+    const emotion = parsed.emotion;
+    const ring    = Number(parsed.ring);
+
+    // 2. Upsert en BD — si ya existe incrementa count
+    const result = await db.query(
+      `
+      INSERT INTO emotional_map_points
+        (user_public_key, chip_text, plutchik_emotion, plutchik_ring, source_summary_id, count)
+      VALUES
+        ($1, $2, $3, $4, $5, 1)
+      ON CONFLICT (user_public_key, chip_text)
+      DO UPDATE SET
+        count          = emotional_map_points.count + 1,
+        source_summary_id = COALESCE($5, emotional_map_points.source_summary_id),
+        updated_at     = NOW()
+      RETURNING *
+      `,
+      [userPublicKey, chipText, emotion, ring, sourceSummaryId ?? null],
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ POST /emotional-map/classify error:", err);
+    res.status(500).json({ error: "Classification failed" });
+  }
+});
+
+/**
+ * GET /emotional-map/:userPublicKey
+ * Devuelve todos los puntos del mapa emocional de un usuario.
+ */
+app.get("/emotional-map/:userPublicKey", async (req, res) => {
+  const { userPublicKey } = req.params;
+
+  if (!userPublicKey) {
+    return res.status(400).json({ error: "userPublicKey is required" });
+  }
+
+  try {
+    const result = await db.query(
+      `
+      SELECT
+        id,
+        chip_text,
+        plutchik_emotion  AS emotion,
+        plutchik_ring     AS ring,
+        count,
+        source_summary_id,
+        created_at,
+        updated_at
+      FROM emotional_map_points
+      WHERE user_public_key = $1
+      ORDER BY updated_at DESC
+      `,
+      [userPublicKey],
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ GET /emotional-map/:userPublicKey error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+
 /**
  * 🩺 Health check
  */
