@@ -39,6 +39,37 @@ app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 /**
+ * 🛡️ Rate limiter simple en memoria
+ * Evita abuso de endpoints costosos (OpenAI, uploads)
+ */
+const rateLimitStore = new Map();
+
+function rateLimit({ windowMs, max }) {
+  return (req, res, next) => {
+    const key = req.ip + req.path;
+    const now = Date.now();
+    const entry = rateLimitStore.get(key);
+
+    if (!entry || now - entry.start > windowMs) {
+      rateLimitStore.set(key, { start: now, count: 1 });
+      return next();
+    }
+
+    entry.count += 1;
+
+    if (entry.count > max) {
+      return res.status(429).json({ error: "Too many requests, please try again later." });
+    }
+
+    next();
+  };
+}
+
+const uploadLimiter      = rateLimit({ windowMs: 60_000, max: 10 });  // 10 uploads/min por IP
+const openAiLimiter      = rateLimit({ windowMs: 60_000, max: 20 });  // 20 clasificaciones/min por IP
+const generalApiLimiter  = rateLimit({ windowMs: 60_000, max: 120 }); // 120 req/min por IP (general)
+
+/**
  * 🔐 Verificar si dos usuarios pertenecen al mismo vínculo
  */
 async function areUsersLinked(userA, userB) {
@@ -1565,10 +1596,18 @@ app.get("/awareness/summaries/:id/emotional-signals", async (req, res) => {
  */
 app.post("/awareness/summaries/:id/emotional-signals", async (req, res) => {
   const { id } = req.params;
-  const { userPublicKey, selectedLayers } = req.body;
+  const { userPublicKey, selectedLayers, signedAt, signerPublicKey, signature } = req.body;
 
   if (!userPublicKey) {
     return res.status(400).json({ error: "Missing userPublicKey" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { id, userPublicKey },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
   }
 
   const normalizedLayers = normalizeSelectedLayers(selectedLayers);
@@ -1684,6 +1723,9 @@ app.post("/awareness", async (req, res) => {
     title,
     impactDescription,
     supportNeeded,
+    signedAt,
+    signerPublicKey,
+    signature,
   } = req.body;
 
   if (
@@ -1696,7 +1738,28 @@ app.post("/awareness", async (req, res) => {
     return res.status(400).json({ error: "Missing fields" });
   }
 
+  const signatureCheck = verifySignedRequest(
+    { linkId, createdByUserKey, title, impactDescription, supportNeeded },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
+
   try {
+    const membershipCheck = await db.query(
+      `SELECT 1 FROM link_members WHERE link_id = $1 AND user_public_key = $2 LIMIT 1`,
+      [linkId, createdByUserKey],
+    );
+    if (membershipCheck.rows.length === 0) {
+      return res.status(403).json({ error: "Not part of this link" });
+    }
+
+    const signingKeyOk = await bindOrVerifySigningKey(createdByUserKey, signerPublicKey);
+    if (!signingKeyOk) {
+      return res.status(403).json({ error: "Signer does not match creator" });
+    }
+
     const result = await db.query(
       `
       INSERT INTO awareness_items
@@ -1759,10 +1822,21 @@ app.patch("/awareness/:id", async (req, res) => {
     title,
     impactDescription,
     supportNeeded,
+    signedAt,
+    signerPublicKey,
+    signature,
   } = req.body;
 
   if (!userPublicKey || !title || !impactDescription || !supportNeeded) {
     return res.status(400).json({ error: "Missing fields" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { id, userPublicKey, title, impactDescription, supportNeeded },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
   }
 
   try {
@@ -1812,10 +1886,18 @@ app.patch("/awareness/:id", async (req, res) => {
  */
 app.post("/awareness/:id/ack", async (req, res) => {
   const { id } = req.params;
-  const { userPublicKey } = req.body;
+  const { userPublicKey, signedAt, signerPublicKey, signature } = req.body;
 
   if (!id || !userPublicKey) {
     return res.status(400).json({ error: "Missing fields" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { id, userPublicKey },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
   }
 
   try {
@@ -1890,6 +1972,19 @@ app.post("/awareness/:id/ack", async (req, res) => {
  */
 app.post("/awareness/:id/checkins", async (req, res) => {
   const { id } = req.params;
+  const { userPublicKey, signedAt, signerPublicKey, signature } = req.body;
+
+  if (!userPublicKey) {
+    return res.status(400).json({ error: "Missing userPublicKey" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { id, userPublicKey },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
 
   try {
     const awarenessResult = await db.query(
@@ -2011,10 +2106,18 @@ app.get("/awareness/:id/checkins", async (req, res) => {
  */
 app.post("/checkins/:id/respond", async (req, res) => {
   const { id } = req.params;
-  const { userPublicKey, responseText } = req.body;
+  const { userPublicKey, responseText, signedAt, signerPublicKey, signature } = req.body;
 
   if (!userPublicKey || !responseText) {
     return res.status(400).json({ error: "Missing fields" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { id, userPublicKey },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
   }
 
   try {
@@ -2160,8 +2263,32 @@ app.get("/checkins/:id/responses", async (req, res) => {
  */
 app.patch("/awareness/:id/archive", async (req, res) => {
   const { id } = req.params;
+  const { userPublicKey, signedAt, signerPublicKey, signature } = req.body;
+
+  if (!userPublicKey) {
+    return res.status(400).json({ error: "Missing userPublicKey" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { id, userPublicKey },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
 
   try {
+    const ownerCheck = await db.query(
+      `SELECT created_by_user_key FROM awareness_items WHERE id = $1 LIMIT 1`,
+      [id],
+    );
+    if (ownerCheck.rows.length === 0) {
+      return res.status(404).json({ error: "Item not found" });
+    }
+    if (ownerCheck.rows[0].created_by_user_key !== userPublicKey) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
     await db.query(
       `
       UPDATE awareness_items
@@ -2182,7 +2309,7 @@ app.patch("/awareness/:id/archive", async (req, res) => {
 /**
  * 🖼️ Subir imagen de chat a Cloudflare R2
  */
-app.post("/uploads/chat-image", async (req, res) => {
+app.post("/uploads/chat-image", uploadLimiter, async (req, res) => {
   try {
     const { base64, mimeType } = req.body;
 
@@ -2244,7 +2371,7 @@ app.post("/uploads/chat-image", async (req, res) => {
   }
 });
 
-app.post("/uploads/delete-chat-image", async (req, res) => {
+app.post("/uploads/delete-chat-image", uploadLimiter, async (req, res) => {
   try {
     const { url } = req.body;
 
@@ -2286,11 +2413,19 @@ app.post("/uploads/delete-chat-image", async (req, res) => {
  * Si el chip ya existe para ese usuario, incrementa count.
  * Body: { userPublicKey, chipText, sourceSummaryId? }
  */
-app.post("/emotional-map/classify", async (req, res) => {
-  const { userPublicKey, chipText, sourceSummaryId } = req.body;
+app.post("/emotional-map/classify", openAiLimiter, async (req, res) => {
+  const { userPublicKey, chipText, sourceSummaryId, signedAt, signerPublicKey, signature } = req.body;
 
   if (!userPublicKey || !chipText) {
     return res.status(400).json({ error: "userPublicKey and chipText are required" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { userPublicKey, chipText },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
   }
 
   if (!openai) {
