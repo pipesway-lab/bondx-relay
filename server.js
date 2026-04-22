@@ -1505,7 +1505,12 @@ app.get("/awareness/:linkId", async (req, res) => {
           '[]'
         ) AS acknowledged_by,
 
-        MAX(aa.created_at) AS last_acknowledged_at
+        MAX(aa.created_at) AS last_acknowledged_at,
+
+        -- Comentario del acknowledge (de quien NO es el creador)
+        MAX(aa.comment)
+        FILTER (WHERE aa.user_public_key != ai.created_by_user_key)
+        AS acknowledge_comment
 
       FROM awareness_items ai
 
