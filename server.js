@@ -1886,10 +1886,15 @@ app.patch("/awareness/:id", async (req, res) => {
  */
 app.post("/awareness/:id/ack", async (req, res) => {
   const { id } = req.params;
-  const { userPublicKey, signedAt, signerPublicKey, signature } = req.body;
+  const { userPublicKey, comment, signedAt, signerPublicKey, signature } = req.body;
 
   if (!id || !userPublicKey) {
     return res.status(400).json({ error: "Missing fields" });
+  }
+
+  // Validar longitud del comentario si se proporciona
+  if (comment && comment.length > 500) {
+    return res.status(400).json({ error: "Comment exceeds 500 characters" });
   }
 
   const signatureCheck = verifySignedRequest(
@@ -1934,11 +1939,12 @@ app.post("/awareness/:id/ack", async (req, res) => {
 
     await db.query(
       `
-      INSERT INTO awareness_acknowledgements (awareness_item_id, user_public_key)
-      VALUES ($1, $2)
-      ON CONFLICT (awareness_item_id, user_public_key) DO NOTHING
+      INSERT INTO awareness_acknowledgements (awareness_item_id, user_public_key, comment)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (awareness_item_id, user_public_key)
+      DO UPDATE SET comment = EXCLUDED.comment
       `,
-      [id, userPublicKey],
+      [id, userPublicKey, comment?.trim() || null],
     );
 
     const creatorKey = item.created_by_user_key;
@@ -1949,7 +1955,9 @@ app.post("/awareness/:id/ack", async (req, res) => {
       await sendExpoPushNotification({
         to: tokens,
         title: "BOND",
-        body: "Tu pareja ha tenido en cuenta uno de tus puntos de cuidado.",
+        body: comment?.trim()
+          ? "Tu pareja ha tenido en cuenta tu punto de cuidado y ha dejado un comentario."
+          : "Tu pareja ha tenido en cuenta uno de tus puntos de cuidado.",
         data: {
           type: "awareness_ack",
           awarenessId: id,
