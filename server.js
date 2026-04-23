@@ -1,4 +1,4 @@
- console.log("Starting BondX relay...");
+console.log("Starting BondX relay...");
 
 const express = require("express");
 const cors = require("cors");
@@ -624,7 +624,7 @@ Responde SOLO con la frase, sin comillas ni explicaciones.`,
       [linkId, phrase],
     );
 
-    console.log(\`✅ Link state phrase updated for link \${linkId}: "\${phrase}"\`);
+    console.log(`✅ Link state phrase updated for link ${linkId}: "${phrase}"`);
   } catch (err) {
     console.error("❌ generateLinkStatePhrase error:", err);
   }
