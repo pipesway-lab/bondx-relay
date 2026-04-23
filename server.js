@@ -561,6 +561,76 @@ ${JSON.stringify(context, null, 2)}
 }
 
 /**
+ * 💬 Genera una frase corta del estado emocional conjunto del vínculo
+ * Se llama automáticamente tras cada nuevo insight de awareness
+ */
+async function generateLinkStatePhrase(linkId) {
+  if (!openai) return;
+
+  try {
+    const summariesResult = await db.query(
+      `
+      SELECT
+        ai.title,
+        s.trend,
+        s.summary,
+        s.suggested_focus
+      FROM awareness_summaries s
+      JOIN awareness_items ai ON s.awareness_item_id = ai.id
+      WHERE ai.link_id = $1
+        AND ai.archived = false
+      ORDER BY s.created_at DESC
+      LIMIT 5
+      `,
+      [linkId],
+    );
+
+    if (summariesResult.rows.length === 0) return;
+
+    const context = summariesResult.rows
+      .map((r) => `- ${r.title} (${r.trend}): ${r.summary}`)
+      .join("\n");
+
+    const response = await openai.responses.create({
+      model: SUMMARY_MODEL,
+      input: [
+        {
+          role: "system",
+          content: `Eres un terapeuta de pareja empático.
+Basándote en los insights recientes de una pareja, genera UNA sola frase
+corta (máximo 20 palabras) que capture el estado emocional conjunto actual
+de la relación. La frase debe ser cálida, honesta y constructiva.
+Responde SOLO con la frase, sin comillas ni explicaciones.`,
+        },
+        {
+          role: "user",
+          content: `Insights recientes de esta pareja:\n${context}`,
+        },
+      ],
+    });
+
+    const phrase = response.output_text?.trim();
+    if (!phrase || phrase.length > 300) return;
+
+    await db.query(
+      `
+      INSERT INTO link_state (link_id, state_phrase, generated_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (link_id)
+      DO UPDATE SET
+        state_phrase = EXCLUDED.state_phrase,
+        generated_at = NOW()
+      `,
+      [linkId, phrase],
+    );
+
+    console.log(\`✅ Link state phrase updated for link \${linkId}: "\${phrase}"\`);
+  } catch (err) {
+    console.error("❌ generateLinkStatePhrase error:", err);
+  }
+}
+
+/**
  * 🤖 Construir contexto para resumen de awareness
  */
 async function buildAwarenessSummaryContext(awarenessId) {
@@ -1505,12 +1575,7 @@ app.get("/awareness/:linkId", async (req, res) => {
           '[]'
         ) AS acknowledged_by,
 
-        MAX(aa.created_at) AS last_acknowledged_at,
-
-        -- Comentario del acknowledge (de quien NO es el creador)
-        MAX(aa.comment)
-        FILTER (WHERE aa.user_public_key != ai.created_by_user_key)
-        AS acknowledge_comment
+        MAX(aa.created_at) AS last_acknowledged_at
 
       FROM awareness_items ai
 
@@ -1694,6 +1759,15 @@ app.post("/awareness/:id/summary", async (req, res) => {
         context.latest_closed_checkin_id,
       ],
     );
+
+    // Actualizar frase de estado del vínculo en background
+    const itemResult = await db.query(
+      `SELECT link_id FROM awareness_items WHERE id = $1 LIMIT 1`,
+      [id],
+    );
+    if (itemResult.rows.length > 0) {
+      void generateLinkStatePhrase(itemResult.rows[0].link_id);
+    }
 
     res.json({
       ...insertResult.rows[0],
@@ -1891,15 +1965,10 @@ app.patch("/awareness/:id", async (req, res) => {
  */
 app.post("/awareness/:id/ack", async (req, res) => {
   const { id } = req.params;
-  const { userPublicKey, comment, signedAt, signerPublicKey, signature } = req.body;
+  const { userPublicKey, signedAt, signerPublicKey, signature } = req.body;
 
   if (!id || !userPublicKey) {
     return res.status(400).json({ error: "Missing fields" });
-  }
-
-  // Validar longitud del comentario si se proporciona
-  if (comment && comment.length > 500) {
-    return res.status(400).json({ error: "Comment exceeds 500 characters" });
   }
 
   const signatureCheck = verifySignedRequest(
@@ -1944,12 +2013,11 @@ app.post("/awareness/:id/ack", async (req, res) => {
 
     await db.query(
       `
-      INSERT INTO awareness_acknowledgements (awareness_item_id, user_public_key, comment)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (awareness_item_id, user_public_key)
-      DO UPDATE SET comment = EXCLUDED.comment
+      INSERT INTO awareness_acknowledgements (awareness_item_id, user_public_key)
+      VALUES ($1, $2)
+      ON CONFLICT (awareness_item_id, user_public_key) DO NOTHING
       `,
-      [id, userPublicKey, comment?.trim() || null],
+      [id, userPublicKey],
     );
 
     const creatorKey = item.created_by_user_key;
@@ -1960,9 +2028,7 @@ app.post("/awareness/:id/ack", async (req, res) => {
       await sendExpoPushNotification({
         to: tokens,
         title: "BOND",
-        body: comment?.trim()
-          ? "Tu pareja ha tenido en cuenta tu punto de cuidado y ha dejado un comentario."
-          : "Tu pareja ha tenido en cuenta uno de tus puntos de cuidado.",
+        body: "Tu pareja ha tenido en cuenta uno de tus puntos de cuidado.",
         data: {
           type: "awareness_ack",
           awarenessId: id,
@@ -2544,6 +2610,33 @@ app.get("/emotional-map/:userPublicKey", async (req, res) => {
   }
 });
 
+
+/**
+ * 🏠 Estado emocional del vínculo para el dashboard
+ */
+app.get("/link-state/:linkId", async (req, res) => {
+  const linkId = parseInt(req.params.linkId, 10);
+
+  if (Number.isNaN(linkId)) {
+    return res.status(400).json({ error: "Invalid linkId" });
+  }
+
+  try {
+    const result = await db.query(
+      `SELECT state_phrase, generated_at FROM link_state WHERE link_id = $1`,
+      [linkId],
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ state_phrase: null, generated_at: null });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ GET /link-state/:linkId error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
 
 /**
  * 🩺 Health check
