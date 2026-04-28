@@ -2639,6 +2639,112 @@ app.get("/link-state/:linkId", async (req, res) => {
 });
 
 /**
+ * ⏰ Job automático: crear checkins cuando han pasado 48h desde el acknowledge
+ * Se ejecuta cada hora. Crea el checkin y notifica a ambos usuarios.
+ */
+async function runCheckinAvailabilityJob() {
+  try {
+    // Buscar awareness items que:
+    // 1. Tienen acknowledge hace más de 48h
+    // 2. No tienen ningún checkin activo
+    // 3. No tienen checkin cerrado en las últimas 48h (evita spam)
+    const result = await db.query(
+      `
+      SELECT
+        ai.id,
+        ai.title,
+        ai.link_id,
+        ai.created_by_user_key,
+        MAX(aa.created_at) AS last_acknowledged_at
+      FROM awareness_items ai
+      JOIN awareness_acknowledgements aa ON aa.awareness_item_id = ai.id
+      WHERE ai.archived = false
+        AND NOT EXISTS (
+          SELECT 1 FROM awareness_checkins ac
+          WHERE ac.awareness_item_id = ai.id
+            AND ac.status = 'active'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM awareness_checkins ac2
+          WHERE ac2.awareness_item_id = ai.id
+            AND ac2.status = 'closed'
+            AND ac2.closed_at > NOW() - INTERVAL '48 hours'
+        )
+      GROUP BY ai.id, ai.title, ai.link_id, ai.created_by_user_key
+      HAVING MAX(aa.created_at) < NOW() - INTERVAL '48 hours'
+      `
+    );
+
+    if (result.rows.length === 0) return;
+
+    console.log(`⏰ Checkin job: ${result.rows.length} awareness items listos`);
+
+    for (const item of result.rows) {
+      try {
+        // Crear el checkin
+        const checkinResult = await db.query(
+          `
+          INSERT INTO awareness_checkins (awareness_item_id, question, status)
+          VALUES ($1, $2, 'active')
+          RETURNING *
+          `,
+          [item.id, "¿Cómo está evolucionando esto últimamente?"],
+        );
+
+        const checkin = checkinResult.rows[0];
+
+        // Obtener ambos miembros del link
+        const membersResult = await db.query(
+          `
+          SELECT user_public_key
+          FROM link_members
+          WHERE link_id = $1
+          `,
+          [item.link_id],
+        );
+
+        const memberKeys = membersResult.rows.map((r) => r.user_public_key);
+
+        // Notificar a ambos usuarios
+        for (const userKey of memberKeys) {
+          const tokens = await getPushTokensByUser(userKey);
+
+          await sendExpoPushNotification({
+            to: tokens,
+            title: "BOND",
+            body: `Nueva revisión disponible: "${item.title}"`,
+            data: {
+              type: "awareness_checkin_available",
+              awarenessId: item.id,
+              checkinId: checkin.id,
+              screen: "awareness",
+              url: "/awareness",
+            },
+          });
+        }
+
+        console.log(`✅ Checkin creado y notificación enviada para awareness: ${item.id}`);
+      } catch (itemErr) {
+        console.error(`❌ Error procesando awareness ${item.id}:`, itemErr);
+      }
+    }
+  } catch (err) {
+    console.error("❌ runCheckinAvailabilityJob error:", err);
+  }
+}
+
+// Ejecutar el job cada hora
+setInterval(() => {
+  void runCheckinAvailabilityJob();
+}, 60 * 60 * 1000);
+
+// También ejecutar al arrancar el servidor (con delay de 30s para dar tiempo a la BD)
+setTimeout(() => {
+  void runCheckinAvailabilityJob();
+}, 30_000);
+
+
+/**
  * 🩺 Health check
  */
 app.get("/health", (req, res) => {
