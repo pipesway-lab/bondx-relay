@@ -2743,6 +2743,271 @@ setTimeout(() => {
   void runCheckinAvailabilityJob();
 }, 30_000);
 
+// ─────────────────────────────────────────────────────────────
+// 🤝 COACHING — Solicitudes de ayuda profesional
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * POST /coaching-requests
+ * Crea una solicitud de coaching. Notifica al segundo miembro para que confirme.
+ */
+app.post("/coaching-requests", async (req, res) => {
+  const {
+    linkId,
+    requestedBy,
+    helpType,
+    sharedAwarenessIds,
+    message,
+    signedAt,
+    signerPublicKey,
+    signature,
+  } = req.body;
+
+  if (!linkId || !requestedBy || !helpType) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
+  const validHelpTypes = ["orientation", "session", "accompaniment"];
+  if (!validHelpTypes.includes(helpType)) {
+    return res.status(400).json({ error: "Invalid helpType" });
+  }
+
+  if (message && message.length > 300) {
+    return res.status(400).json({ error: "Message exceeds 300 characters" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { linkId, requestedBy, helpType },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
+
+  try {
+    // Verificar membresía
+    const membershipCheck = await db.query(
+      `SELECT 1 FROM link_members WHERE link_id = $1 AND user_public_key = $2 LIMIT 1`,
+      [linkId, requestedBy],
+    );
+    if (membershipCheck.rows.length === 0) {
+      return res.status(403).json({ error: "Not part of this link" });
+    }
+
+    // Cancelar solicitudes pendientes anteriores del mismo link
+    await db.query(
+      `
+      UPDATE coaching_requests
+      SET status = 'cancelled', updated_at = NOW()
+      WHERE link_id = $1 AND status = 'pending_partner'
+      `,
+      [linkId],
+    );
+
+    // Crear solicitud
+    const result = await db.query(
+      `
+      INSERT INTO coaching_requests
+        (link_id, requested_by, help_type, shared_awareness_ids, message)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+      `,
+      [
+        linkId,
+        requestedBy,
+        helpType,
+        sharedAwarenessIds ?? [],
+        message?.trim() || null,
+      ],
+    );
+
+    const request = result.rows[0];
+
+    // Notificar al segundo miembro
+    const membersResult = await db.query(
+      `SELECT user_public_key FROM link_members WHERE link_id = $1`,
+      [linkId],
+    );
+
+    const partnerKey = membersResult.rows
+      .map((r) => r.user_public_key)
+      .find((k) => k !== requestedBy);
+
+    if (partnerKey) {
+      const tokens = await getPushTokensByUser(partnerKey);
+      await sendExpoPushNotification({
+        to: tokens,
+        title: "BOND",
+        body: "Tu pareja ha solicitado hablar con un coach. ¿Estás de acuerdo?",
+        data: {
+          type: "coaching_request",
+          coachingRequestId: request.id,
+          screen: "awareness",
+          url: "/awareness",
+        },
+      });
+    }
+
+    res.json(request);
+  } catch (err) {
+    console.error("❌ POST /coaching-requests error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * GET /coaching-requests/:linkId
+ * Devuelve la solicitud activa o pendiente de un link.
+ */
+app.get("/coaching-requests/:linkId", async (req, res) => {
+  const linkId = parseInt(req.params.linkId, 10);
+
+  if (Number.isNaN(linkId)) {
+    return res.status(400).json({ error: "Invalid linkId" });
+  }
+
+  try {
+    const result = await db.query(
+      `
+      SELECT *
+      FROM coaching_requests
+      WHERE link_id = $1
+        AND status IN ('pending_partner', 'confirmed')
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [linkId],
+    );
+
+    res.json(result.rows[0] ?? null);
+  } catch (err) {
+    console.error("❌ GET /coaching-requests/:linkId error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * POST /coaching-requests/:id/confirm
+ * El segundo miembro confirma la solicitud.
+ */
+app.post("/coaching-requests/:id/confirm", async (req, res) => {
+  const { id } = req.params;
+  const { confirmedBy, signedAt, signerPublicKey, signature } = req.body;
+
+  if (!confirmedBy) {
+    return res.status(400).json({ error: "Missing confirmedBy" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { id, confirmedBy },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
+
+  try {
+    const requestResult = await db.query(
+      `SELECT * FROM coaching_requests WHERE id = $1 LIMIT 1`,
+      [id],
+    );
+
+    if (requestResult.rows.length === 0) {
+      return res.status(404).json({ error: "Request not found" });
+    }
+
+    const request = requestResult.rows[0];
+
+    if (request.status !== "pending_partner") {
+      return res.status(400).json({ error: "Request is not pending confirmation" });
+    }
+
+    if (request.requested_by === confirmedBy) {
+      return res.status(403).json({ error: "Cannot confirm your own request" });
+    }
+
+    // Verificar membresía
+    const membershipCheck = await db.query(
+      `SELECT 1 FROM link_members WHERE link_id = $1 AND user_public_key = $2 LIMIT 1`,
+      [request.link_id, confirmedBy],
+    );
+    if (membershipCheck.rows.length === 0) {
+      return res.status(403).json({ error: "Not part of this link" });
+    }
+
+    // Confirmar
+    const updated = await db.query(
+      `
+      UPDATE coaching_requests
+      SET
+        status       = 'confirmed',
+        confirmed_by = $2,
+        confirmed_at = NOW(),
+        updated_at   = NOW()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [id, confirmedBy],
+    );
+
+    // Notificar a quien hizo la solicitud
+    const tokens = await getPushTokensByUser(request.requested_by);
+    await sendExpoPushNotification({
+      to: tokens,
+      title: "BOND",
+      body: "Tu pareja ha aceptado. Pronto os contactaremos para coordinar vuestra sesión.",
+      data: {
+        type: "coaching_confirmed",
+        coachingRequestId: id,
+        screen: "awareness",
+        url: "/awareness",
+      },
+    });
+
+    res.json(updated.rows[0]);
+  } catch (err) {
+    console.error("❌ POST /coaching-requests/:id/confirm error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * POST /coaching-requests/:id/cancel
+ * Cualquiera de los dos puede cancelar.
+ */
+app.post("/coaching-requests/:id/cancel", async (req, res) => {
+  const { id } = req.params;
+  const { cancelledBy, signedAt, signerPublicKey, signature } = req.body;
+
+  if (!cancelledBy) {
+    return res.status(400).json({ error: "Missing cancelledBy" });
+  }
+
+  const signatureCheck = verifySignedRequest(
+    { id, cancelledBy },
+    { signedAt, signerPublicKey, signature },
+  );
+  if (!signatureCheck.ok) {
+    return res.status(signatureCheck.status).json({ error: signatureCheck.error });
+  }
+
+  try {
+    await db.query(
+      `
+      UPDATE coaching_requests
+      SET status = 'cancelled', updated_at = NOW()
+      WHERE id = $1
+      `,
+      [id],
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ POST /coaching-requests/:id/cancel error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
 
 /**
  * 🩺 Health check
