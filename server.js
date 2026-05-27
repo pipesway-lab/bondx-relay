@@ -3009,6 +3009,251 @@ app.post("/coaching-requests/:id/cancel", async (req, res) => {
 });
 
 
+// ─────────────────────────────────────────────────────────────
+// 🔐 ADMIN — Panel de gestión de coaching
+// ─────────────────────────────────────────────────────────────
+
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "bondx-admin-2024";
+
+function requireAdmin(req, res, next) {
+  const auth = req.headers["x-admin-password"];
+  if (!auth || auth !== ADMIN_PASSWORD) {
+    return res.status(401).send(`
+      <!DOCTYPE html>
+      <html lang="es">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>BondX Admin</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { font-family: -apple-system, sans-serif; background: #F2EDE7; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+          .card { background: white; border-radius: 16px; padding: 32px; width: 100%; max-width: 360px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+          h1 { font-size: 22px; color: #1A0F08; margin-bottom: 8px; }
+          p { color: #9B8B7E; font-size: 14px; margin-bottom: 24px; }
+          input { width: 100%; padding: 12px 14px; border: 1px solid #E0D8D0; border-radius: 10px; font-size: 15px; margin-bottom: 12px; }
+          button { width: 100%; padding: 14px; background: #B89B8A; color: white; border: none; border-radius: 10px; font-size: 15px; font-weight: 700; cursor: pointer; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>BondX Admin</h1>
+          <p>Introduce la contraseña para acceder al panel.</p>
+          <input type="password" id="pwd" placeholder="Contraseña" onkeydown="if(event.key==='Enter')login()" />
+          <button onclick="login()">Entrar</button>
+        </div>
+        <script>
+          function login() {
+            const pwd = document.getElementById('pwd').value;
+            fetch('/admin/data', { headers: { 'x-admin-password': pwd } })
+              .then(r => { if (r.ok) { sessionStorage.setItem('ap', pwd); window.location.reload(); } else { alert('Contraseña incorrecta'); } });
+          }
+        </script>
+      </body>
+      </html>
+    `);
+  }
+  next();
+}
+
+app.get("/admin", (req, res) => {
+  const auth = req.headers["x-admin-password"];
+  if (!auth || auth !== ADMIN_PASSWORD) {
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="es">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>BondX Admin</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { font-family: -apple-system, sans-serif; background: #F2EDE7; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+          .card { background: white; border-radius: 16px; padding: 32px; width: 100%; max-width: 360px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+          h1 { font-size: 22px; color: #1A0F08; margin-bottom: 8px; }
+          p { color: #9B8B7E; font-size: 14px; margin-bottom: 24px; }
+          input { width: 100%; padding: 12px 14px; border: 1px solid #E0D8D0; border-radius: 10px; font-size: 15px; margin-bottom: 12px; }
+          button { width: 100%; padding: 14px; background: #B89B8A; color: white; border: none; border-radius: 10px; font-size: 15px; font-weight: 700; cursor: pointer; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>BondX Admin</h1>
+          <p>Introduce la contraseña para acceder al panel.</p>
+          <input type="password" id="pwd" placeholder="Contraseña" onkeydown="if(event.key==='Enter')login()" />
+          <button onclick="login()">Entrar</button>
+        </div>
+        <script>
+          function login() {
+            const pwd = document.getElementById('pwd').value;
+            fetch('/admin/data', { headers: { 'x-admin-password': pwd } })
+              .then(r => {
+                if (r.ok) {
+                  sessionStorage.setItem('ap', pwd);
+                  loadPanel(pwd);
+                } else {
+                  alert('Contraseña incorrecta');
+                }
+              });
+          }
+
+          function formatDate(d) {
+            if (!d) return '—';
+            return new Date(d).toLocaleDateString('es-ES', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
+          }
+
+          function helpLabel(t) {
+            if (t === 'orientation')    return 'Orientación puntual';
+            if (t === 'session')        return 'Sesión de coaching';
+            if (t === 'accompaniment')  return 'Acompañamiento';
+            return t;
+          }
+
+          function statusLabel(s) {
+            if (s === 'pending_partner') return '⏳ Pendiente pareja';
+            if (s === 'confirmed')       return '✅ Confirmada';
+            if (s === 'cancelled')       return '❌ Cancelada';
+            return s;
+          }
+
+          function loadPanel(pwd) {
+            fetch('/admin/data', { headers: { 'x-admin-password': pwd } })
+              .then(r => r.json())
+              .then(data => {
+                document.body.innerHTML = renderPanel(data, pwd);
+              });
+          }
+
+          function markManaged(id, pwd) {
+            fetch('/admin/coaching-requests/' + id + '/manage', {
+              method: 'POST',
+              headers: { 'x-admin-password': pwd }
+            }).then(() => loadPanel(pwd));
+          }
+
+          function renderPanel(data, pwd) {
+            const confirmed  = data.filter(r => r.status === 'confirmed' && !r.managed_at);
+            const managed    = data.filter(r => r.managed_at);
+            const pending    = data.filter(r => r.status === 'pending_partner');
+
+            return \`
+              <div style="font-family:-apple-system,sans-serif;background:#F2EDE7;min-height:100vh;padding:24px 16px">
+                <div style="max-width:600px;margin:0 auto">
+                  <h1 style="font-size:26px;font-weight:800;color:#1A0F08;margin-bottom:4px">BondX Admin</h1>
+                  <p style="color:#9B8B7E;font-size:14px;margin-bottom:24px">Panel de gestión de coaching</p>
+
+                  <div style="display:flex;gap:12px;margin-bottom:24px">
+                    <div style="flex:1;background:white;border-radius:12px;padding:16px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.06)">
+                      <div style="font-size:28px;font-weight:800;color:#B05050">\${confirmed.length}</div>
+                      <div style="font-size:11px;color:#9B8B7E;text-transform:uppercase;letter-spacing:.05em;margin-top:4px">Por gestionar</div>
+                    </div>
+                    <div style="flex:1;background:white;border-radius:12px;padding:16px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.06)">
+                      <div style="font-size:28px;font-weight:800;color:#567565">\${managed.length}</div>
+                      <div style="font-size:11px;color:#9B8B7E;text-transform:uppercase;letter-spacing:.05em;margin-top:4px">Gestionadas</div>
+                    </div>
+                    <div style="flex:1;background:white;border-radius:12px;padding:16px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.06)">
+                      <div style="font-size:28px;font-weight:800;color:#9B8B7E">\${pending.length}</div>
+                      <div style="font-size:11px;color:#9B8B7E;text-transform:uppercase;letter-spacing:.05em;margin-top:4px">Pendientes pareja</div>
+                    </div>
+                  </div>
+
+                  \${confirmed.length > 0 ? \`
+                    <h2 style="font-size:13px;font-weight:700;color:#9B8B7E;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px">Por gestionar</h2>
+                    \${confirmed.map(r => \`
+                      <div style="background:white;border-radius:14px;padding:18px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,0.06);border-left:4px solid #B05050">
+                        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+                          <div>
+                            <div style="font-size:15px;font-weight:700;color:#1A0F08">\${helpLabel(r.help_type)}</div>
+                            <div style="font-size:12px;color:#9B8B7E;margin-top:2px">Confirmada \${formatDate(r.confirmed_at)}</div>
+                          </div>
+                          <div style="background:#FDF0EE;color:#B05050;font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px">\${statusLabel(r.status)}</div>
+                        </div>
+                        \${r.message ? \`<div style="background:#F6F0EC;border-radius:10px;padding:12px;margin-bottom:12px;font-size:14px;color:#3A2A1E;line-height:1.5">\${r.message}</div>\` : ''}
+                        \${r.shared_awareness_ids && r.shared_awareness_ids.length > 0 ? \`
+                          <div style="font-size:12px;color:#9B8B7E;margin-bottom:12px">
+                            Awareness compartidos: <strong>\${r.shared_awareness_ids.length}</strong>
+                          </div>
+                        \` : '<div style="font-size:12px;color:#9B8B7E;margin-bottom:12px">Sin awareness compartidos</div>'}
+                        <div style="font-size:11px;color:#C4B5A8;margin-bottom:14px">Link ID: \${r.link_id}</div>
+                        <button onclick="markManaged('\${r.id}', '\${pwd}')"
+                          style="width:100%;padding:12px;background:#B89B8A;color:white;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer">
+                          Marcar como gestionada
+                        </button>
+                      </div>
+                    \`).join('')}
+                  \` : '<div style="background:white;border-radius:12px;padding:20px;text-align:center;color:#9B8B7E;margin-bottom:24px">No hay solicitudes por gestionar</div>'}
+
+                  \${managed.length > 0 ? \`
+                    <h2 style="font-size:13px;font-weight:700;color:#9B8B7E;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;margin-top:8px">Gestionadas</h2>
+                    \${managed.map(r => \`
+                      <div style="background:white;border-radius:14px;padding:16px;margin-bottom:8px;box-shadow:0 2px 8px rgba(0,0,0,0.04);border-left:4px solid #BFD7C8;opacity:0.8">
+                        <div style="display:flex;justify-content:space-between;align-items:center">
+                          <div>
+                            <div style="font-size:14px;font-weight:700;color:#1A0F08">\${helpLabel(r.help_type)}</div>
+                            <div style="font-size:12px;color:#9B8B7E;margin-top:2px">Gestionada \${formatDate(r.managed_at)}</div>
+                          </div>
+                          <div style="background:#EDF7F0;color:#567565;font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px">✅ Gestionada</div>
+                        </div>
+                      </div>
+                    \`).join('')}
+                  \` : ''}
+                </div>
+              </div>
+            \`;
+          }
+
+          // Auto-login si hay contraseña en sesión
+          const saved = sessionStorage.getItem('ap');
+          if (saved) loadPanel(saved);
+        </script>
+      </body>
+      </html>
+    `);
+  }
+  res.send("ok"); // nunca llega aquí
+});
+
+/**
+ * GET /admin/data — Datos para el panel admin
+ */
+app.get("/admin/data", requireAdmin, async (req, res) => {
+  try {
+    const result = await db.query(
+      `
+      SELECT *
+      FROM coaching_requests
+      ORDER BY created_at DESC
+      LIMIT 100
+      `,
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ GET /admin/data error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
+/**
+ * POST /admin/coaching-requests/:id/manage — Marcar solicitud como gestionada
+ */
+app.post("/admin/coaching-requests/:id/manage", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await db.query(
+      `
+      UPDATE coaching_requests
+      SET managed_at = NOW(), updated_at = NOW()
+      WHERE id = $1
+      `,
+      [id],
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ POST /admin/manage error:", err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
 /**
  * 🩺 Health check
  */
